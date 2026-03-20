@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Идемпотентные намерения сделок (client id / ключ идемпотентности)
+model OrderIntent {
+  id              String   @id @default(cuid())
+  idempotencyKey  String   @unique
+  provider        String
+  side            String
+  status          String
+  payload         Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  level     String
+  action    String
+  meta      Json?
+  createdAt DateTime @default(now())
+}
+
+model TelegramUser {
+  id           String   @id @default(cuid())
+  telegramId   String   @unique
+  tonConnected Boolean  @default(false)
+  accessPaid   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// Singleton: автосимуляция по cron (вкл/выкл из Telegram)
+model BotState {
+  id                 String  @id @default("default")
+  autoTradeEnabled   Boolean @default(false)
+  /// Куда слать уведомления об авто-шаге (обычно chat id того, кто включил)
+  notifyChatId       String?
+  updatedAt          DateTime @updatedAt
+}
