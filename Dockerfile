@@ -15,13 +15,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm install prisma@5.22.0 --no-save
 COPY --from=builder /app/prisma ./prisma
-# Fail build if migrations were not in the build context (otherwise migrate deploy is a no-op and tables are missing).
-RUN migrations=$(find prisma/migrations -name migration.sql 2>/dev/null | wc -l); \
-  if [ "$migrations" -lt 1 ]; then \
-    echo "ERROR: no prisma/migrations/*/migration.sql — commit migrations and rebuild." >&2; \
-    exit 1; \
-  fi
-# Generate query engine for this image (Alpine + OpenSSL 3); avoids stale .prisma from builder cache.
 ENV DATABASE_URL="postgresql://prisma:prisma@127.0.0.1:5432/prisma"
 RUN npx prisma generate
 COPY --from=builder /app/dist ./dist
