@@ -13,6 +13,7 @@ import {
   SpotLivePayload,
   SimulationService,
 } from '../order/simulation.service';
+import { formatSpotBalanceTelegramLines } from '../order/balance-telegram.format';
 import { PrismaService } from '../prisma/prisma.service';
 
 const BOT_STATE_ID = 'default';
@@ -167,18 +168,8 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       const base = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '');
       const u = bal.balances.find((b) => b.asset === 'USDT');
       const b = bal.balances.find((x) => x.asset === base);
-      if (u) {
-        const total = parseFloat(u.free) + parseFloat(u.locked);
-        lines.push(
-          `Счёт USDT на бирже: ${total.toFixed(4)} (free ${u.free}, lock ${u.locked})`,
-        );
-      }
-      if (b) {
-        const t = parseFloat(b.free) + parseFloat(b.locked);
-        lines.push(
-          `Счёт ${base} на бирже: ${t.toFixed(8)} (free ${b.free}, lock ${b.locked})`,
-        );
-      }
+      lines.push('Баланс на бирже после сделки:');
+      lines.push(...formatSpotBalanceTelegramLines(base, u, b));
     } else {
       lines.push(`Баланс не подтянут: ${bal.error}`);
     }

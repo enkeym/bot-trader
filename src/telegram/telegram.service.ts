@@ -71,7 +71,9 @@ export class TelegramService
     const statsHandler = async (ctx: Context) => {
       const uid = ctx.update.update_id;
       if (this.statsUpdateIdsHandled.has(uid)) {
-        this.logger.debug(`stats: update ${uid} уже обработан, пропуск`);
+        this.logger.warn(
+          `Telegram: update_id=${uid} — статистика уже отправлена, второй ответ отменён`,
+        );
         return;
       }
       this.statsUpdateIdsHandled.add(uid);
@@ -104,10 +106,18 @@ export class TelegramService
       });
     });
 
-    /** Одна регистрация на обе команды — меньше риска двойного срабатывания. */
-    this.bot.command(['stats', 'статистика'], statsHandler);
-
-    this.bot.hears(BTN_STATS, statsHandler);
+    /**
+     * Статистика: одна ветка middleware (/stats, /статистика, кнопка клавиатуры).
+     * Раньше были отдельно `command` и `hears` — в стеке grammy это давало два вызова на один апдейт.
+     */
+    this.bot
+      .filter(
+        (ctx) =>
+          ctx.hasCommand('stats') ||
+          ctx.hasCommand('статистика') ||
+          ctx.hasText(BTN_STATS),
+      )
+      .use(statsHandler);
 
     this.bot.hears(BTN_AUTO_ON, async (ctx) => {
       if (!(await this.requireAdmin(ctx))) return;

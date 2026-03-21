@@ -10,6 +10,7 @@ import { AuditService } from '../audit/audit.service';
 import { OrderIntentService } from './order-intent.service';
 import { RiskService } from '../risk/risk.service';
 import { SpreadService } from '../strategy/spread.service';
+import { formatSpotBalanceTelegramLines } from './balance-telegram.format';
 
 /** Поля в payload OrderIntent для бумажной статистики */
 export type SimPayload = {
@@ -434,20 +435,7 @@ export class SimulationService {
           const u = bal.balances.find((b) => b.asset === 'USDT');
           const base = symbol.replace(/USDT$|BUSD$|FDUSD$/, '');
           const bBase = bal.balances.find((b) => b.asset === base);
-          const usdtFree = u ? parseFloat(u.free) + parseFloat(u.locked) : 0;
-          lines.push(
-            `USDT всего: ${usdtFree.toFixed(4)} (free ${u?.free ?? '0'}, lock ${u?.locked ?? '0'})`,
-          );
-          if (bBase) {
-            const q = parseFloat(bBase.free) + parseFloat(bBase.locked);
-            lines.push(
-              `${base} всего: ${q.toFixed(8)} (free ${bBase.free}, lock ${bBase.locked})`,
-            );
-          } else {
-            lines.push(
-              `${base}: на счёте нет (или 0 — не попало в выдачу балансов).`,
-            );
-          }
+          lines.push(...formatSpotBalanceTelegramLines(base, u, bBase));
         }
       }
       lines.push('');
