@@ -21,7 +21,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # без ports — только внутри compose
+    # без ports — только внутри compose (см. README про REDIS_URL с хоста)
 
   bot-trader:
     build:

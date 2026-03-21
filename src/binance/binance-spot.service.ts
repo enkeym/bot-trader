@@ -18,10 +18,12 @@ function buildSignedQueryString(
   return `${queryWithoutSig}&signature=${signature}`;
 }
 
-function isRecvWindowOrTimeError(data: {
-  code?: number;
-  msg?: string;
-} | null): boolean {
+function isRecvWindowOrTimeError(
+  data: {
+    code?: number;
+    msg?: string;
+  } | null,
+): boolean {
   if (!data) return false;
   if (data.code === -1021) return true;
   const m = data.msg ?? '';
@@ -76,7 +78,11 @@ export class BinanceSpotService {
   /** Синхронизация с GET /api/v3/time; кэш ~1 мин, при ошибке -1021 — принудительно. */
   private async ensureServerTime(force = false): Promise<void> {
     const now = Date.now();
-    if (!force && now - this.lastServerSyncAt < 60_000 && this.lastServerSyncAt > 0) {
+    if (
+      !force &&
+      now - this.lastServerSyncAt < 60_000 &&
+      this.lastServerSyncAt > 0
+    ) {
       return;
     }
     if (this.syncPromise) {
@@ -98,9 +104,7 @@ export class BinanceSpotService {
             return;
           }
         }
-        this.log.warn(
-          `GET /api/v3/time неожиданный ответ: HTTP ${res.status}`,
-        );
+        this.log.warn(`GET /api/v3/time неожиданный ответ: HTTP ${res.status}`);
       } catch (e) {
         this.log.warn(
           `GET /api/v3/time: ${e instanceof Error ? e.message : String(e)}`,

@@ -17,7 +17,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   constructor(private readonly config: ConfigService) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     const url = this.config.get<string>('redisUrl')?.trim();
     if (!url) {
       this.logger.warn('REDIS_URL not set — distributed locks/cache disabled');
@@ -40,6 +40,19 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.client.on('error', (err) => {
       this.logger.warn(`Redis: ${err.message}`);
     });
+    try {
+      await this.client.ping();
+      this.logger.log(
+        'Redis: подключение OK (дедуп Telegram update_id между процессами)',
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(
+        `Redis: старт без рабочего соединения (${msg}). ` +
+          'Telegram дедуп по update_id только внутри одного процесса — при двух инстансах с одним токеном ответы продублируются. ' +
+          'Для npm на хосте: свой Redis на localhost, override compose с ports или оставьте REDIS_URL пустым — см. README.',
+      );
+    }
   }
 
   async onModuleDestroy() {
