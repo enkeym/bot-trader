@@ -9,6 +9,15 @@ import type {
 const BINANCE_P2P_SEARCH =
   'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search';
 
+/** Как в веб-клиенте Binance: без payTypes/countries API часто отдаёт пустой data[] с нехарактерных IP. */
+const P2P_HEADERS = {
+  'Content-Type': 'application/json',
+  Accept: 'application/json',
+  clienttype: 'web',
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+} as const;
+
 interface BinanceAdvPayload {
   advNo: string;
   price: string;
@@ -47,8 +56,17 @@ export class BinanceC2cProvider implements P2PProvider {
 
     let hint: string | undefined;
     if (buyTop.length === 0 && sellTop.length === 0) {
+      const rubNote =
+        f.toUpperCase() === 'RUB'
+          ? ' Для FIAT=RUB стакан с VPS/датацентра за пределами РФ у Binance часто пустой — попробуйте FIAT=USD или EUR, либо резидентский IP/VPN под регион RUB.'
+          : '';
       hint =
-        'Binance ответил успешно, но объявлений нет (data:[]). Так бывает для выбранной пары ASSET/FIAT, региональных ограничений P2P или отсутствия контрагентов. Проверьте пару в .env (FIAT/ASSET), другой FIAT (USD, EUR) или сеть/VPN.';
+        'Binance ответил успешно, но объявлений нет (data:[]). Проверьте ASSET/FIAT на p2p.binance.com; с «чужого» IP часто пусто для отдельных фиатов.' +
+        rubNote +
+        ' Либо смените FIAT (USD, EUR), либо сеть/VPN.';
+      this.logger.warn(
+        `Binance P2P: пустой стакан ${a}/${f} (обе стороны). code=000000, data=[].`,
+      );
     }
 
     return {
@@ -73,6 +91,8 @@ export class BinanceC2cProvider implements P2PProvider {
       tradeType,
       page: 1,
       rows: 20,
+      payTypes: [] as string[],
+      countries: [] as string[],
       publisherType: null,
     };
 
@@ -84,11 +104,7 @@ export class BinanceC2cProvider implements P2PProvider {
         success?: boolean;
       }>(BINANCE_P2P_SEARCH, body, {
         timeout: 15000,
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent':
-            'Mozilla/5.0 (compatible; TraderBot/1.0; +https://github.com/)',
-        },
+        headers: { ...P2P_HEADERS },
       });
 
       if (data?.code != null && data.code !== '000000') {
