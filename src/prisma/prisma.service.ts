@@ -12,9 +12,10 @@ export class PrismaService
   }
 
   /**
-   * Если в образе не было prisma/migrations, migrate deploy не создаёт таблицы.
-   * Дублирует init + bot_state миграции через IF NOT EXISTS (идемпотентно).
-   * Одна инструкция на вызов — ограничение Prisma $executeRaw.
+   * Fallback, когда в контейнере не гоняют `prisma migrate deploy` (образ без миграций).
+   * Создаёт таблицы и догоняет колонки через ADD COLUMN IF NOT EXISTS — иначе схема
+   * из schema.prisma и реальная БД расходятся после каждого расширения модели.
+   * Предпочтительно по-прежнему: `prisma migrate deploy` при старте/деплое.
    */
   private async ensureSchemaTables() {
     await this.$transaction(async (tx) => {
@@ -60,9 +61,17 @@ CREATE TABLE IF NOT EXISTS "BotState" (
     "id" TEXT NOT NULL DEFAULT 'default',
     "autoTradeEnabled" BOOLEAN NOT NULL DEFAULT false,
     "notifyChatId" TEXT,
+    "spotTrackedBtc" DECIMAL(18,8) NOT NULL DEFAULT 0,
+    "spotAvgEntryUsdt" DECIMAL(18,8) NOT NULL DEFAULT 0,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "BotState_pkey" PRIMARY KEY ("id")
 )`);
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "spotTrackedBtc" DECIMAL(18,8) NOT NULL DEFAULT 0`,
+      );
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "spotAvgEntryUsdt" DECIMAL(18,8) NOT NULL DEFAULT 0`,
+      );
     });
   }
 
