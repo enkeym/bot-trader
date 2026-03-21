@@ -33,6 +33,12 @@ export default () => ({
     roundtripTakeProfitPercent: parseFloat(
       process.env.BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT ?? '0.15',
     ),
+    /**
+     * true — при каждом сигнале докупать, пока TP не достигнут (старое поведение).
+     * false — пока есть учётная позиция и TP не сработал, не BUY (ждём роста цены до SELL).
+     */
+    roundtripAccumulateOnSignal:
+      process.env.BINANCE_SPOT_ROUNDTRIP_ACCUMULATE === 'true',
     /** Окно допустимого сдвига timestamp для подписанных запросов (мс), макс. 60000 */
     recvWindowMs: Math.min(
       60_000,

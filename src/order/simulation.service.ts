@@ -17,7 +17,10 @@ import { AuditService } from '../audit/audit.service';
 import { OrderIntentService } from './order-intent.service';
 import { RiskService } from '../risk/risk.service';
 import { SpreadService } from '../strategy/spread.service';
-import { formatSpotBalanceTelegramLines } from './balance-telegram.format';
+import {
+  formatSpotBalanceShortLines,
+  parseSpotExchangeFill,
+} from './balance-telegram.format';
 
 /** Поля в payload OrderIntent для бумажной статистики */
 export type SimPayload = {
@@ -398,13 +401,8 @@ export class SimulationService {
     executedQty: number;
     cumQuote: number;
   } {
-    const ex = data['executedQty'];
-    const executedQty =
-      typeof ex === 'string' ? parseFloat(ex) : Number(ex ?? NaN);
-    const cq = data['cummulativeQuoteQty'] ?? data['cumQuote'];
-    const cumQuote =
-      typeof cq === 'string' ? parseFloat(cq) : Number(cq ?? NaN);
-    return { executedQty, cumQuote };
+    const { baseQty, usdt } = parseSpotExchangeFill(data);
+    return { executedQty: baseQty, cumQuote: usdt };
   }
 
   private async persistRoundtripState(
@@ -460,6 +458,8 @@ export class SimulationService {
     const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
     const tpPercent =
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
+    const accumulateOnSignal =
+      this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
     const baseAsset = symbol.replace(/USDT$|BUSD$|FDUSD$/, '');
 
     const p2pSpreadContext = {
@@ -569,6 +569,26 @@ export class SimulationService {
       }
       resolvedSide = 'SELL';
       sellQty = quantity;
+    } else if (!accumulateOnSignal && tracked > 0) {
+      const threshold = avgEntry * (1 + tpPercent / 100);
+      await this.audit.log('info', 'roundtrip_skip', {
+        reason: 'hold_until_tp_no_accumulate',
+        tracked,
+        avgEntryUsdt: avgEntry,
+        markPrice,
+        tpThresholdUsdt: threshold,
+        tpPercent,
+        symbol,
+      });
+      return {
+        ev,
+        ok: true,
+        dryRun,
+        executionMode,
+        order: null,
+        estimatedProfitUsdt,
+        orderCreated: false,
+      };
     } else {
       resolvedSide = 'BUY';
       quoteOrderQty = Math.min(notionalUsdt, maxQuote);
@@ -814,12 +834,13 @@ export class SimulationService {
   }
 
   /**
-   * Сводка для Telegram: площадка, автоторговля, баланс/бумага, оценка «заработка», последние сделки.
+   * Краткая сводка для Telegram: баланс, сделки, прибыль по продажам.
    */
   async buildTelegramTradingReport(): Promise<string> {
     const dryRun = this.config.get<boolean>('dryRun') ?? true;
     const hasKeys = this.binanceSpot.spotExecutionAllowed();
     const symbol = this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
+    const baseAsset = symbol.replace(/USDT$|BUSD$|FDUSD$/, '') || 'BTC';
     const spotStrategy =
       this.config.get<'fixed_side' | 'roundtrip'>('binance.spotStrategy') ??
       'fixed_side';
@@ -827,6 +848,8 @@ export class SimulationService {
       this.config.get<'BUY' | 'SELL'>('binance.spotOrderSide') ?? 'BUY';
     const tpPct =
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
+    const rtAccumulate =
+      this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
     const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
     const spotBaseUrl =
       this.config.get<string>('binance.spotBaseUrl') ??
@@ -841,111 +864,83 @@ export class SimulationService {
     });
     const autoOn = st?.autoTradeEnabled ?? false;
 
-    let venue: string;
-    if (dryRun) {
-      const rtNote =
-        spotStrategy === 'roundtrip'
-          ? ` Roundtrip: учёт позиции в БД по синтетическим сделкам (марк с ${spotBaseUrl}), TP +${tpPct}%.`
-          : '';
-      venue = [
-        'Режим: бумага (DRY_RUN=true).',
-        `Сигнал: спред P2P ${asset}/${fiat} → запись SIMULATED, Spot не вызывается.${rtNote}`,
-      ].join('\n');
-    } else if (hasKeys) {
-      const isProdApi =
-        spotBaseUrl.replace(/\/$/, '') === 'https://api.binance.com';
-      const spotLine =
-        spotStrategy === 'roundtrip'
-          ? `Стратегия Spot: roundtrip (BUY до TP или SELL учётной позиции), TP +${tpPct}% к средней цене входа, не больше ${maxQuote} USDT за BUY.`
-          : `Пара: ${symbol}, MARKET ${spotSide}, не больше ${maxQuote} USDT за ордер.`;
-      const tracked =
-        st?.spotTrackedBtc != null ? Number(st.spotTrackedBtc) : 0;
-      const avgE =
-        st?.spotAvgEntryUsdt != null ? Number(st.spotAvgEntryUsdt) : 0;
-      const posLine =
-        spotStrategy === 'roundtrip'
-          ? `Учётная позиция roundtrip: ${tracked.toFixed(8)} BTC, средняя цена входа ~${avgE > 0 ? avgE.toFixed(2) : '—'} USDT/BTC.`
-          : '';
-      venue = [
-        isProdApi
-          ? 'Режим: Spot Binance (основная сеть, реальные средства).'
-          : `Режим: Spot Binance (тестовая/кастомная база: ${spotBaseUrl}).`,
-        spotLine,
-        ...(posLine ? [posLine] : []),
-        `Сигнал стратегии: спред P2P ${asset}/${fiat} и риск-фильтр.`,
-      ].join('\n');
-    } else {
-      venue = [
-        'DRY_RUN=false, но ключи Spot не заданы: добавьте BINANCE_API_KEY и BINANCE_API_SECRET.',
-      ].join('\n');
-    }
+    const isProdApi =
+      spotBaseUrl.replace(/\/$/, '') === 'https://api.binance.com';
+    const netLabel = isProdApi ? 'основная сеть Binance' : 'тестовая сеть';
 
     const lines: string[] = [
-      '📍 Куда сейчас торгуем',
-      venue,
-      '',
-      `⏱ Автоторговля: ${autoOn ? 'ВКЛ' : 'ВЫКЛ'} (тик каждые ${Math.round(intervalMs / 1000)} с)`,
+      '📊 Статистика',
+      `Биржа: ${netLabel} (${spotBaseUrl})`,
+      `Пара: ${symbol}`,
+      `Автоторговля: ${autoOn ? 'включена' : 'выключена'}, шаг каждые ${Math.round(intervalMs / 1000)} с`,
       '',
     ];
 
     if (dryRun) {
       const dash = await this.getPaperDashboard();
-      lines.push('💰 Бумажный баланс (не биржа)');
+      lines.push('Режим без реальной биржи (тест в базе).');
       lines.push(
-        `Текущий: ${dash.currentPaperWalletUsdt} USDT (старт ${dash.startingPaperWalletUsdt})`,
+        `Виртуальный кошелёк в отчёте: ${dash.currentPaperWalletUsdt} USDT (старт ${dash.startingPaperWalletUsdt}).`,
       );
-      lines.push('');
-      lines.push('📈 Накопленная оценка по модели (сумма оценок за циклы)');
       lines.push(
-        `Всего по оценкам: ${dash.totalEstimatedPnLUsdt} USDT (модель спреда, не гарантия прибыли).`,
+        `Сделок в базе (тест): ${dash.totalSimulatedTrades}, сумма «оценок» в расчёте: ${dash.totalEstimatedPnLUsdt} USDT.`,
       );
+    } else if (!hasKeys) {
+      lines.push('Ключи API не заданы — реальный баланс недоступен.');
     } else {
-      lines.push('💰 Баланс на бирже (Spot)');
-      if (!hasKeys) {
-        lines.push(
-          'Нет ключей — задайте BINANCE_API_KEY и BINANCE_API_SECRET.',
-        );
+      const bal = await this.binanceSpot.getAccountBalances();
+      if (!bal.ok) {
+        lines.push(`Баланс не загрузился: ${bal.error}`);
       } else {
-        const bal = await this.binanceSpot.getAccountBalances();
-        if (!bal.ok) {
-          lines.push(`Не удалось загрузить: ${bal.error}`);
-          if (
-            bal.error.includes('recvWindow') ||
-            bal.error.includes('Timestamp')
-          ) {
-            lines.push(
-              '(Обычно это расхождение часов с Binance; в приложении время синхронизируется с api/v3/time. При повторе ошибки проверьте системные часы или WSL: `wsl --shutdown` и перезапуск.)',
-            );
-          } else if (
-            bal.error.includes('Invalid API-key') ||
-            bal.error.includes('permissions for action')
-          ) {
-            lines.push(
-              '(Binance −2015: ключ/секрет, права (Reading + Spot), whitelist IP — или неверная база URL: ключи с testnet.binance.vision работают только с BINANCE_SPOT_BASE_URL=https://testnet.binance.vision; ключи с binance.com — с https://api.binance.com.)',
-            );
-          }
-        } else {
-          const u = bal.balances.find((b) => b.asset === 'USDT');
-          const base = symbol.replace(/USDT$|BUSD$|FDUSD$/, '');
-          const bBase = bal.balances.find((b) => b.asset === base);
-          lines.push(...formatSpotBalanceTelegramLines(base, u, bBase));
-        }
+        const u = bal.balances.find((b) => b.asset === 'USDT');
+        const bBase = bal.balances.find((b) => b.asset === baseAsset);
+        lines.push('Сейчас на счёте:');
+        lines.push(...formatSpotBalanceShortLines(baseAsset, u, bBase));
       }
       lines.push('');
-      const spotAgg = await this.aggregateSpotEstimatedPnl();
-      lines.push('📈 Оценка сигнала по Spot-операциям (по модели P2P-спреда)');
+      if (spotStrategy === 'roundtrip') {
+        const tracked =
+          st?.spotTrackedBtc != null ? Number(st.spotTrackedBtc) : 0;
+        const avgE =
+          st?.spotAvgEntryUsdt != null ? Number(st.spotAvgEntryUsdt) : 0;
+        lines.push(
+          'Стратегия: купить → дождаться роста цены → продать учётный объём.',
+        );
+        lines.push(
+          `Продажа, когда цена выше средней покупки на ${tpPct}% (не больше ${maxQuote} USDT за одну покупку).`,
+        );
+        lines.push(
+          `Докупать каждый раз при сигнале: ${rtAccumulate ? 'да' : 'нет'}.`,
+        );
+        lines.push(
+          `У бота в учёте: ${tracked.toFixed(8)} ${baseAsset}, средняя цена покупки ${avgE > 0 ? `~${avgE.toFixed(2)} USDT за 1 ${baseAsset}` : '—'}.`,
+        );
+      } else {
+        lines.push(
+          `Стратегия: только ${spotSide}, до ${maxQuote} USDT за ордер.`,
+        );
+      }
       lines.push(
-        `Сумма оценок: ${spotAgg.sum.toFixed(6)} USDT (${spotAgg.count} ордеров). Реализованный результат по Spot — после продажи базового актива.`,
+        `Сделки разрешены, если на P2P ${asset}/${fiat} достаточно большой спред (фильтр в настройках).`,
       );
+      lines.push('');
+      const agg = await this.aggregateSpotExecStats();
+      lines.push('Всего по исполненным ордерам на бирже:');
+      lines.push(
+        `Покупок: ${agg.buyCount}, потрачено ~${agg.buyUsdt.toFixed(4)} USDT`,
+      );
+      lines.push(
+        `Продаж: ${agg.sellCount}, получено ~${agg.sellUsdt.toFixed(4)} USDT`,
+      );
+      if (agg.sellCount > 0) {
+        lines.push(
+          `Прибыль с продаж (по учёту бота после продаж): ${agg.profitFromSellsUsdt >= 0 ? '+' : ''}${agg.profitFromSellsUsdt.toFixed(4)} USDT`,
+        );
+      }
     }
 
     lines.push('');
-    lines.push('📋 Последние операции');
-    if (!dryRun) {
-      lines.push(
-        'Строки «P2P симуляция» — тики оценки спреда (не Spot). Реальные сделки Spot помечены «Spot …».',
-      );
-    }
+    lines.push('Последние операции:');
 
     const recent = await this.prisma.orderIntent.findMany({
       orderBy: { createdAt: 'desc' },
@@ -953,91 +948,98 @@ export class SimulationService {
     });
 
     if (recent.length === 0) {
-      lines.push('Пока пусто.');
+      lines.push('Пока нет записей.');
     } else {
       for (const r of recent) {
-        lines.push(this.formatOperationLine(r));
+        lines.push(this.formatOperationLine(r, baseAsset));
       }
     }
-
-    lines.push('');
-    lines.push(
-      'Оценки по спреду — упрощённая модель; детали исполнения Spot — в строках «Spot» выше.',
-    );
 
     return lines.join('\n');
   }
 
-  private async aggregateSpotEstimatedPnl(): Promise<{
-    sum: number;
-    count: number;
+  private async aggregateSpotExecStats(): Promise<{
+    buyCount: number;
+    sellCount: number;
+    buyUsdt: number;
+    sellUsdt: number;
+    profitFromSellsUsdt: number;
   }> {
     const rows = await this.prisma.orderIntent.findMany({
-      where: { provider: 'binance_spot' },
+      where: { provider: 'binance_spot', status: 'EXECUTED' },
       select: { payload: true },
     });
-    let sum = 0;
-    let count = 0;
+    let buyCount = 0;
+    let sellCount = 0;
+    let buyUsdt = 0;
+    let sellUsdt = 0;
+    let profitFromSellsUsdt = 0;
     for (const r of rows) {
       const p = r.payload as SpotLivePayload | null;
-      const v = p?.estimatedStrategyPnlUsdt;
-      if (v != null && !Number.isNaN(v)) {
-        sum += v;
-        count++;
+      if (!p?.spot?.side || !p.exchangeResponse) continue;
+      const { usdt } = parseSpotExchangeFill(p.exchangeResponse);
+      if (!Number.isFinite(usdt)) continue;
+      if (p.spot.side === 'BUY') {
+        buyCount++;
+        buyUsdt += usdt;
+      } else if (p.spot.side === 'SELL') {
+        sellCount++;
+        sellUsdt += usdt;
+        const rp = p.roundtrip?.realizedPnlUsdtEstimate;
+        if (rp != null && Number.isFinite(rp)) profitFromSellsUsdt += rp;
       }
     }
-    return { sum, count };
+    return {
+      buyCount,
+      sellCount,
+      buyUsdt,
+      sellUsdt,
+      profitFromSellsUsdt,
+    };
   }
 
-  private formatOperationLine(r: {
-    createdAt: Date;
-    provider: string;
-    side: string;
-    status: string;
-    payload: unknown;
-  }): string {
+  private formatOperationLine(
+    r: {
+      createdAt: Date;
+      provider: string;
+      side: string;
+      status: string;
+      payload: unknown;
+    },
+    baseAsset: string,
+  ): string {
     const t = r.createdAt.toISOString().slice(0, 16).replace('T', ' ');
     if (r.provider === 'binance' && r.status === 'SIMULATED') {
       const p = r.payload as SimPayload | null;
-      const est = p?.estimatedProfitUsdt;
-      const net = p?.netSpreadPercent;
       const rt = p?.roundtrip;
-      const estStr =
-        est == null
-          ? '—'
-          : `${est >= 0 ? '+' : ''}${est.toFixed(4)} USDT (оценка)`;
-      const netStr = net == null ? '—' : `${net.toFixed(3)}%`;
       if (rt) {
-        return `• ${t} | P2P+roundtrip бумага | ${rt.chosenSide} @~${rt.markPrice.toFixed(2)} | спред ${netStr} | ${estStr}`;
+        const sideRu = rt.chosenSide === 'BUY' ? 'купил бы' : 'продал бы';
+        return `• ${t} | Тест (без биржи): ${sideRu} по ~${rt.markPrice.toFixed(2)} USDT за 1 ${baseAsset}, в учёте после шага ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`;
       }
-      return `• ${t} | P2P симуляция | спред ${netStr} | ${estStr}`;
+      return `• ${t} | Тест (без биржи): сигнал, в расчёте ~${p?.notionalUsdt ?? '—'} USDT`;
     }
     if (r.provider === 'binance_spot') {
       const p = r.payload as SpotLivePayload | null;
-      const est = p?.estimatedStrategyPnlUsdt;
-      const estStr =
-        est == null
-          ? '—'
-          : `${est >= 0 ? '+' : ''}${est.toFixed(4)} USDT (оценка сигнала)`;
       if (r.status === 'FAILED') {
-        return `• ${t} | Spot ❌ | ${p?.error ?? r.status} | ${estStr}`;
+        return `• ${t} | Ошибка: ${p?.error ?? r.status}`;
       }
       const ex = p?.exchangeResponse;
-      let cost = '—';
-      if (ex && typeof ex === 'object') {
-        const q = ex['cummulativeQuoteQty'] ?? ex['cumQuote'];
-        if (q != null && (typeof q === 'string' || typeof q === 'number')) {
-          cost = `${q} USDT`;
-        }
-      }
-      const sym = p?.spot?.symbol ?? '?';
-      const sd = p?.spot?.side ?? '?';
+      const { baseQty, usdt } = parseSpotExchangeFill(ex);
+      const sd = p?.spot?.side;
       const rtp = p?.roundtrip?.realizedPnlUsdtEstimate;
-      const pnlExtra =
-        sd === 'SELL' && rtp != null && !Number.isNaN(rtp)
-          ? ` | реализ. ~${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} USDT`
-          : '';
-      return `• ${t} | Spot ${sym} ${sd} ✅ | потрачено ~${cost} | ${estStr}${pnlExtra}`;
+      if (sd === 'BUY' && Number.isFinite(usdt) && Number.isFinite(baseQty)) {
+        return `• ${t} | Купил ${baseQty.toFixed(8)} ${baseAsset} за ${usdt.toFixed(4)} USDT`;
+      }
+      if (sd === 'SELL' && Number.isFinite(usdt) && Number.isFinite(baseQty)) {
+        let tail = '';
+        if (rtp != null && Number.isFinite(rtp)) {
+          const cost = usdt - rtp;
+          const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
+          tail = `; прибыль ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} USDT (~${pct}% к себестоимости)`;
+        }
+        return `• ${t} | Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT${tail}`;
+      }
+      return `• ${t} | ${sd ?? '?'} ${p?.spot?.symbol ?? ''} (детали не распарсились)`;
     }
     return `• ${t} | ${r.provider} ${r.status}`;
   }

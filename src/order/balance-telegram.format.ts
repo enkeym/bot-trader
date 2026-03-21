@@ -1,53 +1,44 @@
+/** Ответ биржи на MARKET-ордер: сколько базы и сколько USDT. */
+export function parseSpotExchangeFill(ex: unknown): {
+  baseQty: number;
+  usdt: number;
+} {
+  if (!ex || typeof ex !== 'object') return { baseQty: NaN, usdt: NaN };
+  const o = ex as Record<string, unknown>;
+  const eq = o['executedQty'];
+  const baseQty = typeof eq === 'string' ? parseFloat(eq) : Number(eq ?? NaN);
+  const cq = o['cummulativeQuoteQty'] ?? o['cumQuote'];
+  const usdt = typeof cq === 'string' ? parseFloat(cq) : Number(cq ?? NaN);
+  return { baseQty, usdt };
+}
+
 /**
- * Человекочитаемый вывод Spot-баланса в Telegram (без жаргона free/lock).
+ * Краткий баланс Spot для Telegram (без лишних терминов).
  */
-export function formatSpotBalanceTelegramLines(
+export function formatSpotBalanceShortLines(
   baseAsset: string,
   usdt: { free: string; locked: string } | undefined,
   baseRow: { free: string; locked: string } | undefined,
 ): string[] {
-  const fmtQuote = (n: number) =>
+  const uf = usdt ? parseFloat(usdt.free) : 0;
+  const ul = usdt ? parseFloat(usdt.locked) : 0;
+  const uTot = uf + ul;
+  const bf = baseRow ? parseFloat(baseRow.free) : 0;
+  const bl = baseRow ? parseFloat(baseRow.locked) : 0;
+  const bTot = bf + bl;
+
+  const fmtU = (n: number) =>
     n.toLocaleString('ru-RU', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 4,
     });
-
-  const fmtBase = (n: number) => {
+  const fmtB = (n: number) => {
     const s = n.toFixed(8).replace(/\.?0+$/, '');
     return s === '' ? '0' : s;
   };
 
-  const out: string[] = [];
-
-  const uf = usdt ? parseFloat(usdt.free) : 0;
-  const ul = usdt ? parseFloat(usdt.locked) : 0;
-  const uTot = uf + ul;
-
-  out.push(`USDT — котируемая валюта (оплата покупок в этой паре)`);
-  out.push(`  всего: ${fmtQuote(uTot)} USDT`);
-  out.push(`  свободно (доступно сейчас): ${fmtQuote(uf)}`);
-  out.push(
-    ul > 0
-      ? `  в ордерах (заморожено): ${fmtQuote(ul)}`
-      : `  в ордерах: 0 — ничего не заморожено`,
-  );
-
-  out.push('');
-  out.push(`${baseAsset} — базовый актив пары (купленный объём)`);
-  if (baseRow) {
-    const bf = parseFloat(baseRow.free);
-    const bl = parseFloat(baseRow.locked);
-    const bt = bf + bl;
-    out.push(`  всего: ${fmtBase(bt)} ${baseAsset}`);
-    out.push(`  свободно: ${fmtBase(bf)}`);
-    out.push(
-      bl > 0
-        ? `  в ордерах: ${fmtBase(bl)}`
-        : `  в ордерах: 0 — ничего не заморожено`,
-    );
-  } else {
-    out.push(`  на счёте нет или 0 ${baseAsset}`);
-  }
-
-  return out;
+  return [
+    `USDT: ${fmtU(uTot)} (свободно ${fmtU(uf)}${ul > 0 ? `, в ордерах ${fmtU(ul)}` : ''})`,
+    `${baseAsset}: ${fmtB(bTot)} (свободно ${fmtB(bf)}${bl > 0 ? `, в ордерах ${fmtB(bl)}` : ''})`,
+  ];
 }

@@ -13,7 +13,10 @@ import {
   SpotLivePayload,
   SimulationService,
 } from '../order/simulation.service';
-import { formatSpotBalanceTelegramLines } from '../order/balance-telegram.format';
+import {
+  formatSpotBalanceShortLines,
+  parseSpotExchangeFill,
+} from '../order/balance-telegram.format';
 import { PrismaService } from '../prisma/prisma.service';
 
 const BOT_STATE_ID = 'default';
@@ -110,101 +113,77 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     const o = res.order;
     if (!o) return '';
 
+    const spotSym = this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
+    const baseAsset = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'BTC';
+
     if (dryRun && o.status === 'SIMULATED') {
       const p = o.payload as SimPayload | null;
-      const est = p?.estimatedProfitUsdt;
       const rt = p?.roundtrip;
-      const baseLines = [
-        '🔔 Автоторговля — бумага (DRY_RUN, реальной сделки нет)',
-        `Пара P2P (сигнал): ${this.config.get<string>('market.asset') ?? 'USDT'}/${this.config.get<string>('market.fiat') ?? 'RUB'}`,
-        `Чистый спред: ${p?.netSpreadPercent != null ? `${p.netSpreadPercent.toFixed(3)}%` : '—'}`,
-        `Оценка прибыли за цикл: ${est != null ? `${est >= 0 ? '+' : ''}${est.toFixed(4)} USDT` : '—'}`,
-        `Объём в расчёте (notional): ${p?.notionalUsdt ?? '—'} USDT`,
-      ];
       if (rt) {
-        baseLines.push(
-          `Roundtrip (бумага): ${rt.chosenSide}, марк ~${rt.markPrice.toFixed(2)} USDT`,
-          `TP порог: ${rt.takeProfitPercent}% к средней цене входа`,
-          `После шага: позиция ~${rt.trackedBtcAfter.toFixed(8)} BTC, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} USDT/BTC`,
-        );
+        const verb = rt.chosenSide === 'BUY' ? 'Купил бы' : 'Продал бы';
+        return [
+          '🧪 Тест (деньги на бирже не трогаются)',
+          `Пара: ${spotSym}`,
+          `${verb} по цене ~${rt.markPrice.toFixed(2)} USDT за 1 ${baseAsset}`,
+          `После шага в учёте бота: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}, средняя входа ~${rt.avgEntryUsdtAfter.toFixed(2)} USDT/${baseAsset}`,
+        ].join('\n');
       }
-      baseLines.push(`Запись в БД: ${o.id}`);
-      return baseLines.join('\n');
+      return [
+        '🧪 Тест (без реальной сделки)',
+        `Пара: ${spotSym}`,
+        `Сумма в расчёте: ~${p?.notionalUsdt ?? '—'} USDT`,
+      ].join('\n');
     }
 
     const pl = o.payload as SpotLivePayload | null;
-    const sym = pl?.spot?.symbol ?? '—';
-    const side = pl?.spot?.side ?? '—';
-
     if (o.status === 'FAILED') {
       return [
-        '🔔 Автоторговля — Spot Binance ❌',
-        `Пара: ${sym}, сторона: ${side}`,
-        `Ошибка: ${pl?.error ?? '—'}`,
-        `Оценка сигнала (P2P): ${pl?.estimatedStrategyPnlUsdt != null ? `${pl.estimatedStrategyPnlUsdt >= 0 ? '+' : ''}${pl.estimatedStrategyPnlUsdt.toFixed(4)} USDT` : '—'}`,
-        `Запись: ${o.id}`,
+        '❌ Сделка не прошла',
+        `Пара: ${pl?.spot?.symbol ?? spotSym}`,
+        pl?.error ?? 'ошибка',
       ].join('\n');
     }
 
     const ex = pl?.exchangeResponse ?? {};
-    const oid = ex['orderId'];
-    const oidStr =
-      oid === undefined || oid === null
-        ? '—'
-        : typeof oid === 'object'
-          ? JSON.stringify(oid)
-          : typeof oid === 'bigint'
-            ? oid.toString()
-            : String(oid as string | number | boolean);
-    const execQty = ex['executedQty'];
-    const cumQ = ex['cummulativeQuoteQty'] ?? ex['cumQuote'];
-    const qtyStr =
-      typeof execQty === 'string' || typeof execQty === 'number'
-        ? String(execQty)
-        : '—';
-    const quoteStr =
-      typeof cumQ === 'string' || typeof cumQ === 'number' ? String(cumQ) : '—';
+    const { baseQty, usdt } = parseSpotExchangeFill(ex);
+    const side = pl?.spot?.side;
+    const rtp = pl?.roundtrip?.realizedPnlUsdtEstimate;
 
-    const rt = pl?.roundtrip;
-    const lines = [
-      '🔔 Автоторговля — Spot Binance ✅',
-      `Сделка: ${sym} ${side} (MARKET)`,
-      `Исполнено базы: ${qtyStr}`,
-      `Стоимость в котируемой (USDT): ${quoteStr}`,
-      `Order ID биржи: ${oidStr}`,
-      `Оценка сигнала по P2P (не реализ. PnL): ${pl?.estimatedStrategyPnlUsdt != null ? `${pl.estimatedStrategyPnlUsdt >= 0 ? '+' : ''}${pl.estimatedStrategyPnlUsdt.toFixed(4)} USDT` : '—'}`,
-    ];
-    if (rt) {
-      lines.push(
-        `Roundtrip: марк ~${rt.markPrice.toFixed(2)}, TP-порог ${rt.takeProfitPercent}%`,
-        `После сделки: позиция ~${rt.trackedBtcAfter.toFixed(8)} BTC, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} USDT/BTC`,
+    const head = ['✅ Сделка на бирже', `Пара: ${pl?.spot?.symbol ?? spotSym}`];
+
+    if (side === 'BUY' && Number.isFinite(baseQty) && Number.isFinite(usdt)) {
+      head.push(
+        `Купил ${baseQty.toFixed(8)} ${baseAsset} за ${usdt.toFixed(4)} USDT`,
       );
-      if (
-        rt.realizedPnlUsdtEstimate != null &&
-        !Number.isNaN(rt.realizedPnlUsdtEstimate)
-      ) {
-        const r = rt.realizedPnlUsdtEstimate;
-        lines.push(
-          `Оценка реализ. PnL (SELL): ${r >= 0 ? '+' : ''}${r.toFixed(4)} USDT`,
-        );
+    } else if (
+      side === 'SELL' &&
+      Number.isFinite(baseQty) &&
+      Number.isFinite(usdt)
+    ) {
+      let line = `Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT`;
+      if (rtp != null && Number.isFinite(rtp)) {
+        const cost = usdt - rtp;
+        const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
+        line += `\nПрибыль с этой продажи: ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} USDT (~${pct}% к себестоимости)`;
       }
+      head.push(line);
+    } else {
+      head.push(`Сторона: ${side ?? '—'}, объём по ответу биржи не распознан`);
     }
 
     const bal = await this.binanceSpot.getAccountBalances();
     if (bal.ok) {
-      const spotSym =
-        this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
-      const base = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '');
       const u = bal.balances.find((b) => b.asset === 'USDT');
-      const b = bal.balances.find((x) => x.asset === base);
-      lines.push('Баланс на бирже после сделки:');
-      lines.push(...formatSpotBalanceTelegramLines(base, u, b));
+      const b = bal.balances.find((x) => x.asset === baseAsset);
+      head.push('');
+      head.push('Сейчас на счёте:');
+      head.push(...formatSpotBalanceShortLines(baseAsset, u, b));
     } else {
-      lines.push(`Баланс не подтянут: ${bal.error}`);
+      head.push('');
+      head.push(`Баланс не подтянут: ${bal.error}`);
     }
 
-    lines.push(`Запись: ${o.id}`);
-    return lines.join('\n');
+    return head.join('\n');
   }
 
   private async sendTelegram(chatId: string, text: string) {

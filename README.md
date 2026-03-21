@@ -133,7 +133,7 @@ make down
 - **Нет**, если вы только смотрите спред и включаете **симуляцию** с `DRY_RUN=true` — используется **публичный** endpoint поиска объявлений P2P, ключи не передаются.
 - **Да**, для **Spot** создайте ключи в аккаунте Binance → **API Management**, укажите в `.env` `BINANCE_API_KEY` / `BINANCE_API_SECRET`, выставьте `DRY_RUN=false`. Исполнение — **рыночный ордер** по паре `BINANCE_SPOT_SYMBOL` (по умолчанию `BTCUSDT`); сигнал стратегии — по **P2P-спреду** USDT/RUB и риск-фильтру (это не арбитраж Spot↔P2P).
 
-**Стратегия Spot:** по умолчанию `BINANCE_SPOT_STRATEGY=fixed_side` — одна сторона (`BINANCE_SPOT_ORDER_SIDE`, обычно BUY). Режим **`roundtrip`** включает цикл покупки и продажи учётной позиции: при сигнале P2P бот либо покупает на сумму до `BINANCE_SPOT_MAX_QUOTE_USDT`, либо продаёт накопленный объём BTC, когда цена на Spot не ниже средней цены входа плюс `BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT` (например `0.15` = 0.15%). Учёт позиции хранится в PostgreSQL (`BotState`); продаётся только то, что бот сам накопил по этой логике. Оценка прибыли по P2P-спреду в отчётах по-прежнему **не равна** реализованному PnL на Spot.
+**Стратегия Spot:** по умолчанию `BINANCE_SPOT_STRATEGY=fixed_side` — одна сторона (`BINANCE_SPOT_ORDER_SIDE`, обычно BUY). Режим **`roundtrip`** включает цикл покупки и продажи учётной позиции: при сигнале P2P бот либо покупает на сумму до `BINANCE_SPOT_MAX_QUOTE_USDT`, либо продаёт накопленный объём BTC, когда цена на Spot не ниже средней цены входа плюс `BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT` (например `0.15` = 0.15%). По умолчанию **без** `BINANCE_SPOT_ROUNDTRIP_ACCUMULATE=true` бот **не докупает** каждый тик при уже открытой учётной позиции — ждёт, пока маркет-доценка достигнет TP и сработает SELL (иначе бесконечные BUY размывают среднюю и TP может долго не наступать). `ACCUMULATE=true` включает прежнее поведение «докупать при каждом сигнале». Учёт позиции хранится в PostgreSQL (`BotState`); продаётся только то, что бот сам накопил по этой логике. Оценка прибыли по P2P-спреду в отчётах по-прежнему **не равна** реализованному PnL на Spot.
 
 ### Как создать API Key на Binance
 
@@ -208,35 +208,9 @@ REDIS_URL=redis://127.0.0.1:6379
 
 ## Переменные окружения (.env)
 
-Полный шаблон — в [.env.example](.env.example). Кратко:
+Шаблон — [.env.example](.env.example). Обязательно: **`DATABASE_URL`**, **`TELEGRAM_BOT_TOKEN`**. Остальное — в комментариях в шаблоне; для Spot при `DRY_RUN=false` — ключи Binance и `BINANCE_SPOT_BASE_URL` (testnet: `https://testnet.binance.vision`).
 
-| Переменная                                                                                               | Назначение                                                                                           |
-| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                                                                                           | Подключение к PostgreSQL                                                                             |
-| `TELEGRAM_BOT_TOKEN`                                                                                     | Токен от BotFather (**обязателен** для работы бота)                                                  |
-| `PORT`                                                                                                   | Порт HTTP (по умолчанию 3000)                                                                        |
-| `REDIS_URL`                                                                                              | Опционально, Redis                                                                                   |
-| `BINANCE_API_KEY` / `BINANCE_API_SECRET`                                                                 | Ключи Spot из [Binance API Management](https://www.binance.com/en/my/settings/api-management)        |
-| `BINANCE_SPOT_BASE_URL`                                                                                  | Продакшен: `https://api.binance.com` (по умолчанию). Testnet-ключи: `https://testnet.binance.vision` |
-| `BINANCE_SPOT_SYMBOL`, `BINANCE_SPOT_ORDER_SIDE`, `BINANCE_SPOT_MAX_QUOTE_USDT`, `BINANCE_SPOT_QUANTITY` | Параметры MARKET-ордера в режиме `fixed_side` (см. [.env.example](.env.example))                     |
-| `BINANCE_SPOT_STRATEGY`                                                                                  | `fixed_side` (по умолчанию) или `roundtrip` (BUY/SELL по позиции и take-profit)                       |
-| `BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT`                                                             | Порог к средней цене входа в % (только `roundtrip`)                                                  |
-| `DRY_RUN`                                                                                                | `true` — только запись `SIMULATED` в БД; `false` — при прохождении риска и наличии ключей — Spot API |
-| `EXECUTION_MODE`                                                                                         | `AUTO_EXCHANGE_ONLY` или `REQUIRE_HUMAN_BANK_CONFIRM` — см. [docs/MVP.md](docs/MVP.md)               |
-| `P2P_PROVIDER`                                                                                           | Сейчас поддерживается `binance`                                                                      |
-| `FIAT` / `ASSET`                                                                                         | Например `RUB` и `USDT`                                                                              |
-| `MIN_SPREAD_PERCENT`                                                                                     | Минимальный спред для риск-фильтра                                                                   |
-| `MAX_NOTIONAL_USDT`                                                                                      | Верхняя граница объёма в логике риска (USDT)                                                         |
-| `DAILY_MAX_LOSS_USDT`                                                                                    | Зарезервировано под дневные лимиты (расширение логики)                                               |
-| `P2P_TAKER_FEE_PERCENT`                                                                                  | Оценка комиссии для «чистого» спреда                                                                 |
-| `PUBLIC_BASE_URL`                                                                                        | Базовый URL приложения (для текста команды `/connect`)                                               |
-| `TON_CONNECT_MANIFEST_URL`                                                                               | URL манифеста для кошельков (часто совпадает с `PUBLIC_BASE_URL/tonconnect-manifest.json` на проде)  |
-| `TON_PAYMENT_RECIPIENT`                                                                                  | Опционально, адрес для платежей в TON                                                                |
-| `REQUIRE_TON_ACCESS`                                                                                     | `true` — часть команд только при `accessPaid` у пользователя в БД                                    |
-| `TELEGRAM_ALERT_CHAT_ID`                                                                                 | Опционально, куда слать алерты о спреде                                                              |
-| `ADMIN_TELEGRAM_IDS`                                                                                     | Список user id через запятую; обход `REQUIRE_TON_ACCESS`                                             |
-
-Валидация части переменных при старте — в [src/config/env.validation.ts](src/config/env.validation.ts).
+Дополнительные ключи (TON, режим банковского подтверждения и т.д.) описаны в коде: [src/config/configuration.ts](src/config/configuration.ts), валидация в [src/config/env.validation.ts](src/config/env.validation.ts).
 
 ---
 
