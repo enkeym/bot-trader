@@ -25,6 +25,14 @@ export default () => ({
     ),
     /** Для MARKET SELL — объём в базовом активе (напр. BTC) */
     spotQuantity: parseFloat(process.env.BINANCE_SPOT_QUANTITY ?? '0'),
+    /** `fixed_side` — одна сторона из BINANCE_SPOT_ORDER_SIDE; `roundtrip` — BUY/SELL по позиции и take-profit */
+    spotStrategy:
+      (process.env.BINANCE_SPOT_STRATEGY as 'fixed_side' | 'roundtrip') ??
+      'fixed_side',
+    /** Порог take-profit к средней цене входа (%, напр. 0.15 = 0.15%) */
+    roundtripTakeProfitPercent: parseFloat(
+      process.env.BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT ?? '0.15',
+    ),
     /** Окно допустимого сдвига timestamp для подписанных запросов (мс), макс. 60000 */
     recvWindowMs: Math.min(
       60_000,

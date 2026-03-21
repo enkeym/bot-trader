@@ -113,14 +113,23 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     if (dryRun && o.status === 'SIMULATED') {
       const p = o.payload as SimPayload | null;
       const est = p?.estimatedProfitUsdt;
-      return [
+      const rt = p?.roundtrip;
+      const baseLines = [
         '🔔 Автоторговля — бумага (DRY_RUN, реальной сделки нет)',
         `Пара P2P (сигнал): ${this.config.get<string>('market.asset') ?? 'USDT'}/${this.config.get<string>('market.fiat') ?? 'RUB'}`,
         `Чистый спред: ${p?.netSpreadPercent != null ? `${p.netSpreadPercent.toFixed(3)}%` : '—'}`,
         `Оценка прибыли за цикл: ${est != null ? `${est >= 0 ? '+' : ''}${est.toFixed(4)} USDT` : '—'}`,
         `Объём в расчёте (notional): ${p?.notionalUsdt ?? '—'} USDT`,
-        `Запись в БД: ${o.id}`,
-      ].join('\n');
+      ];
+      if (rt) {
+        baseLines.push(
+          `Roundtrip (бумага): ${rt.chosenSide}, марк ~${rt.markPrice.toFixed(2)} USDT`,
+          `TP порог: ${rt.takeProfitPercent}% к средней цене входа`,
+          `После шага: позиция ~${rt.trackedBtcAfter.toFixed(8)} BTC, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} USDT/BTC`,
+        );
+      }
+      baseLines.push(`Запись в БД: ${o.id}`);
+      return baseLines.join('\n');
     }
 
     const pl = o.payload as SpotLivePayload | null;
@@ -156,6 +165,7 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     const quoteStr =
       typeof cumQ === 'string' || typeof cumQ === 'number' ? String(cumQ) : '—';
 
+    const rt = pl?.roundtrip;
     const lines = [
       '🔔 Автоторговля — Spot Binance ✅',
       `Сделка: ${sym} ${side} (MARKET)`,
@@ -164,6 +174,21 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       `Order ID биржи: ${oidStr}`,
       `Оценка сигнала по P2P (не реализ. PnL): ${pl?.estimatedStrategyPnlUsdt != null ? `${pl.estimatedStrategyPnlUsdt >= 0 ? '+' : ''}${pl.estimatedStrategyPnlUsdt.toFixed(4)} USDT` : '—'}`,
     ];
+    if (rt) {
+      lines.push(
+        `Roundtrip: марк ~${rt.markPrice.toFixed(2)}, TP-порог ${rt.takeProfitPercent}%`,
+        `После сделки: позиция ~${rt.trackedBtcAfter.toFixed(8)} BTC, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} USDT/BTC`,
+      );
+      if (
+        rt.realizedPnlUsdtEstimate != null &&
+        !Number.isNaN(rt.realizedPnlUsdtEstimate)
+      ) {
+        const r = rt.realizedPnlUsdtEstimate;
+        lines.push(
+          `Оценка реализ. PnL (SELL): ${r >= 0 ? '+' : ''}${r.toFixed(4)} USDT`,
+        );
+      }
+    }
 
     const bal = await this.binanceSpot.getAccountBalances();
     if (bal.ok) {

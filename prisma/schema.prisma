@@ -43,5 +43,9 @@ model BotState {
   autoTradeEnabled   Boolean @default(false)
   /// Куда слать уведомления об авто-шаге (обычно chat id того, кто включил)
   notifyChatId       String?
+  /// Учётная позиция BTC для режима BINANCE_SPOT_STRATEGY=roundtrip (только накопленное ботом)
+  spotTrackedBtc     Decimal @default(0) @db.Decimal(18, 8)
+  /// Средневзвешенная цена входа (USDT за 1 BTC); 0 если позиции нет
+  spotAvgEntryUsdt   Decimal @default(0) @db.Decimal(18, 8)
   updatedAt          DateTime @updatedAt
 }

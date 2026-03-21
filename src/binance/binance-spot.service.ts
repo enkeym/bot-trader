@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import { createHmac } from 'crypto';
+import type { LotSizeFilter } from './spot-roundtrip.util';
 
 function signQuery(secret: string, queryWithoutSig: string): string {
   return createHmac('sha256', secret).update(queryWithoutSig).digest('hex');
@@ -251,6 +252,90 @@ export class BinanceSpotService {
       }
       const err = res.data as { msg?: string };
       return { ok: false, error: err?.msg ?? `HTTP ${res.status}` };
+    } catch (e) {
+      const err = e as AxiosError<{ msg?: string }>;
+      return {
+        ok: false,
+        error: err.response?.data?.msg ?? err.message ?? 'Unknown error',
+      };
+    }
+  }
+
+  /** Публичный тикер (без ключей). Та же база, что и Spot (testnet или prod). */
+  async getTickerPrice(
+    symbol: string,
+  ): Promise<{ ok: true; price: number } | { ok: false; error: string }> {
+    const base = this.getBaseUrl().replace(/\/$/, '');
+    const sym = symbol.trim().toUpperCase();
+    try {
+      const res = await axios.get(`${base}/api/v3/ticker/price`, {
+        params: { symbol: sym },
+        timeout: 15_000,
+        validateStatus: () => true,
+      });
+      if (res.status >= 200 && res.status < 300) {
+        const p = (res.data as { price?: string }).price;
+        const n = p != null ? parseFloat(String(p)) : NaN;
+        if (Number.isFinite(n) && n > 0) {
+          return { ok: true, price: n };
+        }
+      }
+      const err = res.data as { msg?: string };
+      return {
+        ok: false,
+        error: err?.msg ?? `HTTP ${res.status}`,
+      };
+    } catch (e) {
+      const err = e as AxiosError<{ msg?: string }>;
+      return {
+        ok: false,
+        error: err.response?.data?.msg ?? err.message ?? 'Unknown error',
+      };
+    }
+  }
+
+  /** Фильтр LOT_SIZE для символа (публичный exchangeInfo). */
+  async getLotSizeFilter(
+    symbol: string,
+  ): Promise<{ ok: true; lot: LotSizeFilter } | { ok: false; error: string }> {
+    const base = this.getBaseUrl().replace(/\/$/, '');
+    const sym = symbol.trim().toUpperCase();
+    try {
+      const res = await axios.get(`${base}/api/v3/exchangeInfo`, {
+        params: { symbol: sym },
+        timeout: 15_000,
+        validateStatus: () => true,
+      });
+      if (res.status < 200 || res.status >= 300) {
+        const err = res.data as { msg?: string };
+        return { ok: false, error: err?.msg ?? `HTTP ${res.status}` };
+      }
+      const data = res.data as {
+        symbols?: Array<{
+          symbol: string;
+          filters?: Array<{
+            filterType?: string;
+            minQty?: string;
+            stepSize?: string;
+          }>;
+        }>;
+      };
+      const s = data.symbols?.find((x) => x.symbol === sym);
+      const lotF = s?.filters?.find((f) => f.filterType === 'LOT_SIZE');
+      const minQty = lotF?.minQty != null ? parseFloat(lotF.minQty) : NaN;
+      const stepSize = lotF?.stepSize != null ? parseFloat(lotF.stepSize) : NaN;
+      if (
+        !Number.isFinite(minQty) ||
+        !Number.isFinite(stepSize) ||
+        minQty <= 0 ||
+        stepSize <= 0
+      ) {
+        return {
+          ok: false,
+          error: `LOT_SIZE не найден или невалиден для ${sym}`,
+        };
+      }
+      return { ok: true, lot: { minQty, stepSize } };
     } catch (e) {
       const err = e as AxiosError<{ msg?: string }>;
       return {
