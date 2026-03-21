@@ -30,9 +30,11 @@ export class BinanceC2cProvider implements P2PProvider {
     asset: string,
     fiat: string,
   ): Promise<P2pMarketSnapshot> {
+    const a = asset.trim();
+    const f = fiat.trim();
     const [buyBook, sellBook] = await Promise.all([
-      this.search(asset, fiat, 'BUY'),
-      this.search(asset, fiat, 'SELL'),
+      this.search(a, f, 'BUY'),
+      this.search(a, f, 'SELL'),
     ]);
 
     const buyTop = buyBook.slice(0, 10);
@@ -50,8 +52,8 @@ export class BinanceC2cProvider implements P2PProvider {
     }
 
     return {
-      asset,
-      fiat,
+      asset: a,
+      fiat: f,
       bestBuyUsdtPrice,
       bestSellUsdtPrice,
       buyTop,

@@ -38,10 +38,10 @@ export default () => ({
   executionMode:
     (process.env.EXECUTION_MODE as ExecutionMode) ??
     ExecutionMode.AUTO_EXCHANGE_ONLY,
-  p2pProvider: process.env.P2P_PROVIDER ?? 'binance',
+  p2pProvider: (process.env.P2P_PROVIDER ?? 'binance').trim(),
   market: {
-    fiat: process.env.FIAT ?? 'RUB',
-    asset: process.env.ASSET ?? 'USDT',
+    fiat: (process.env.FIAT ?? 'RUB').trim(),
+    asset: (process.env.ASSET ?? 'USDT').trim(),
   },
   strategy: {
     minSpreadPercent: parseFloat(process.env.MIN_SPREAD_PERCENT ?? '0.15'),
