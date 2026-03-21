@@ -25,6 +25,14 @@ export default () => ({
     ),
     /** Для MARKET SELL — объём в базовом активе (напр. BTC) */
     spotQuantity: parseFloat(process.env.BINANCE_SPOT_QUANTITY ?? '0'),
+    /** Окно допустимого сдвига timestamp для подписанных запросов (мс), макс. 60000 */
+    recvWindowMs: Math.min(
+      60_000,
+      Math.max(
+        5_000,
+        parseInt(process.env.BINANCE_RECV_WINDOW_MS ?? '60000', 10),
+      ),
+    ),
   },
   dryRun: process.env.DRY_RUN !== 'false',
   executionMode:

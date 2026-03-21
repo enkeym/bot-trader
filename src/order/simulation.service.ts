@@ -415,6 +415,14 @@ export class SimulationService {
         const bal = await this.binanceSpot.getAccountBalances();
         if (!bal.ok) {
           lines.push(`Не удалось загрузить: ${bal.error}`);
+          if (
+            bal.error.includes('recvWindow') ||
+            bal.error.includes('Timestamp')
+          ) {
+            lines.push(
+              '(Обычно это расхождение часов с Binance; в приложении время синхронизируется с api/v3/time. При повторе ошибки проверьте системные часы или WSL: `wsl --shutdown` и перезапуск.)',
+            );
+          }
         } else {
           const u = bal.balances.find((b) => b.asset === 'USDT');
           const base = symbol.replace(/USDT$|BUSD$|FDUSD$/, '');
@@ -427,6 +435,10 @@ export class SimulationService {
             const q = parseFloat(bBase.free) + parseFloat(bBase.locked);
             lines.push(
               `${base} всего: ${q.toFixed(8)} (free ${bBase.free}, lock ${bBase.locked})`,
+            );
+          } else {
+            lines.push(
+              `${base}: на счёте нет (или 0 — не попало в выдачу балансов).`,
             );
           }
         }
@@ -441,6 +453,11 @@ export class SimulationService {
 
     lines.push('');
     lines.push('📋 Последние операции');
+    if (!dryRun) {
+      lines.push(
+        'Строки «P2P симуляция» — тики оценки спреда (не Spot). Реальные сделки Spot помечены «Spot …».',
+      );
+    }
 
     const recent = await this.prisma.orderIntent.findMany({
       orderBy: { createdAt: 'desc' },
@@ -501,7 +518,7 @@ export class SimulationService {
           ? '—'
           : `${est >= 0 ? '+' : ''}${est.toFixed(4)} USDT (оценка)`;
       const netStr = net == null ? '—' : `${net.toFixed(3)}%`;
-      return `• ${t} | бумага | спред ${netStr} | ${estStr}`;
+      return `• ${t} | P2P симуляция | спред ${netStr} | ${estStr}`;
     }
     if (r.provider === 'binance_spot') {
       const p = r.payload as SpotLivePayload | null;
