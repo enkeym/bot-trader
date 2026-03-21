@@ -155,6 +155,7 @@ export class SimulationService {
         grossSpreadPercent: gross,
         netSpreadPercent: net,
         notionalUsdt,
+        ...(ev.snapshot.hint ? { p2pHint: ev.snapshot.hint } : {}),
       });
       return {
         ev,
@@ -359,6 +360,9 @@ export class SimulationService {
     const spotSide =
       this.config.get<'BUY' | 'SELL'>('binance.spotOrderSide') ?? 'BUY';
     const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
+    const spotBaseUrl =
+      this.config.get<string>('binance.spotBaseUrl') ??
+      'https://api.binance.com';
     const intervalMs =
       this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
     const fiat = this.config.get<string>('market.fiat') ?? 'RUB';
@@ -376,8 +380,12 @@ export class SimulationService {
         `Сигнал: спред P2P ${asset}/${fiat} → запись SIMULATED, Spot не вызывается.`,
       ].join('\n');
     } else if (hasKeys) {
+      const isProdApi =
+        spotBaseUrl.replace(/\/$/, '') === 'https://api.binance.com';
       venue = [
-        'Режим: Spot Binance (реальные средства, api.binance.com).',
+        isProdApi
+          ? 'Режим: Spot Binance (основная сеть, реальные средства).'
+          : `Режим: Spot Binance (тестовая/кастомная база: ${spotBaseUrl}).`,
         `Пара: ${symbol}, MARKET ${spotSide}, не больше ${maxQuote} USDT за ордер.`,
         `Сигнал стратегии: спред P2P ${asset}/${fiat} и риск-фильтр.`,
       ].join('\n');

@@ -26,11 +26,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.client = new Redis(url, {
       maxRetriesPerRequest: null,
       enableOfflineQueue: false,
-      connectTimeout: 10_000,
+      connectTimeout: 15_000,
       retryStrategy: (times) => {
         if (times > 8) {
           this.logger.warn(
-            'Redis: прекращаем переподключения. Проверьте, что контейнер запущен: docker compose up -d redis',
+            'Redis: прекращаем переподключения. Проверьте: docker compose up -d redis, REDIS_URL (в Docker — redis://redis:6379).',
           );
           return null;
         }
@@ -40,18 +40,34 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.client.on('error', (err) => {
       this.logger.warn(`Redis: ${err.message}`);
     });
-    try {
-      await this.client.ping();
-      this.logger.log(
-        'Redis: подключение OK (дедуп Telegram update_id между процессами)',
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error(
-        `Redis: старт без рабочего соединения (${msg}). ` +
-          'Telegram дедуп по update_id только внутри одного процесса — при двух инстансах с одним токеном ответы продублируются. ' +
-          'Для npm на хосте: свой Redis на localhost, override compose с ports или оставьте REDIS_URL пустым — см. README.',
-      );
+    const maxAttempts = 25;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.client.ping();
+        this.logger.log(
+          'Redis: подключение OK (дедуп Telegram update_id между процессами)',
+        );
+        return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (attempt === maxAttempts) {
+          this.logger.error(
+            `Redis: не удалось подключиться (${msg}). ` +
+              'Telegram дедуп только внутри процесса. Docker: убедитесь, что в compose задан REDIS_URL=redis://redis:6379; локально: redis://127.0.0.1:6379 при пробросе порта или оставьте REDIS_URL пустым — см. README.',
+          );
+          try {
+            await this.client.quit();
+          } catch {
+            /* ignore */
+          }
+          this.client = null;
+          return;
+        }
+        this.logger.warn(
+          `Redis: попытка ${attempt}/${maxAttempts} (${msg}), повтор через 1 с…`,
+        );
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     }
   }
 

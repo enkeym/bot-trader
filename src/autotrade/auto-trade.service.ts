@@ -38,9 +38,13 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       update: {},
     });
     const ms = this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
+    const dryRun = this.config.get<boolean>('dryRun') ?? true;
     this.intervalRef = setInterval(() => void this.tick(), ms);
     this.logger.log(
-      `Auto-trade tick каждые ${ms} ms (DRY_RUN=бумага; при DRY_RUN=false + ключи — Spot Binance)`,
+      `Auto-trade tick каждые ${ms} ms — ` +
+        (dryRun
+          ? 'DRY_RUN=true: записи SIMULATED, Spot не вызывается'
+          : 'DRY_RUN=false: при ключах Spot — реальные ордера на BINANCE_SPOT_BASE_URL'),
     );
   }
 

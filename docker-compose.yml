@@ -21,7 +21,15 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # без ports — только внутри compose (см. README про REDIS_URL с хоста)
+    # С хоста (npm run start:dev + make infra): REDIS_URL=redis://127.0.0.1:6379
+    ports:
+      - '127.0.0.1:6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
 
   bot-trader:
     build:
@@ -34,6 +42,7 @@ services:
     env_file:
       - .env
     environment:
+      # Перекрывают .env: в контейнере хост БД — postgres/redis, не localhost
       NODE_ENV: production
       PORT: '3000'
       DATABASE_URL: postgresql://${POSTGRES_USER:-trader}:${POSTGRES_PASSWORD:-trader}@postgres:5432/${POSTGRES_DB:-trader}?schema=public
@@ -42,7 +51,7 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   pgdata:
