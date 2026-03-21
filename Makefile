@@ -4,7 +4,7 @@
 .PHONY: help up infra down restart rebuild destroy logs ps \
 	install build dev prod start app \
 	migrate migrate-dev prisma-generate \
-	clean clean-all lint test
+	clean clean-data clean-all lint test
 
 COMPOSE := docker compose
 SLEEP_DB := sleep 3
@@ -37,6 +37,7 @@ help:
 	@echo ""
 	@echo "  Прочее:"
 	@echo "    make clean       — удалить dist/"
+	@echo "    make clean-data  — очистить данные: все таблицы приложения в Postgres + FLUSHALL в Redis (нужны DATABASE_URL и запущенный redis из compose)"
 	@echo "    make clean-all   — clean + node_modules/"
 	@echo "    make lint        — eslint"
 	@echo "    make test        — jest"
@@ -106,6 +107,13 @@ prisma-generate:
 
 clean:
 	@rm -rf dist
+
+# TRUNCATE всех таблиц из prisma/schema.prisma; Redis — весь инстанс (FLUSHALL).
+clean-data:
+	@echo "Очистка PostgreSQL (таблицы OrderIntent, AuditLog, TelegramUser, BotState)..."
+	@echo 'TRUNCATE TABLE "OrderIntent", "AuditLog", "TelegramUser", "BotState" RESTART IDENTITY CASCADE;' | npx prisma db execute --stdin --schema=prisma/schema.prisma
+	@echo "Очистка Redis (docker compose service redis)..."
+	@$(COMPOSE) exec -T redis redis-cli FLUSHALL
 
 clean-all: clean
 	@rm -rf node_modules
