@@ -5,11 +5,13 @@ import {
   OnModuleDestroy,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Bot, Context, Keyboard } from 'grammy';
+import { Bot, Context, InputFile, Keyboard } from 'grammy';
 import { AutoTradeService } from '../autotrade/auto-trade.service';
+import { MarketStatsService } from '../market/market-stats.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { SimulationService } from '../order/simulation.service';
+import { TradeExportService } from '../order/trade-export.service';
 import { TonService } from '../ton/ton.service';
 
 const MAX_MSG = 4000;
@@ -35,6 +37,8 @@ export class TelegramService
     private readonly ton: TonService,
     private readonly autoTrade: AutoTradeService,
     private readonly redis: RedisService,
+    private readonly marketStats: MarketStatsService,
+    private readonly tradeExport: TradeExportService,
   ) {}
 
   onApplicationBootstrap() {
@@ -103,7 +107,7 @@ export class TelegramService
           'Трейдер Binance Spot + сигнал по P2P-спреду.',
           '',
           'Кнопки ниже — статистика и (для админа) автоторговля.',
-          'Команды: /stats, /autotrade',
+          'Команды: /stats, /market, /autotrade (админ: /trades_export)',
         ].join('\n'),
         { reply_markup: await this.mainKeyboardForUser(ctx) },
       );
@@ -127,6 +131,44 @@ export class TelegramService
           ctx.hasText(BTN_STATS),
       )
       .use(statsHandler);
+
+    this.bot.command('market', async (ctx) => {
+      if (!(await this.requireAccess(ctx))) return;
+      const arg = ctx.message?.text?.trim().split(/\s+/)[1];
+      const report = await this.marketStats.getReport(arg);
+      if (!report) {
+        await ctx.reply(
+          'Не удалось загрузить свечи Binance (проверьте сеть и BINANCE_SPOT_BASE_URL).',
+          { reply_markup: await this.mainKeyboardForUser(ctx) },
+        );
+        return;
+      }
+      const text = this.marketStats.formatTelegram(report);
+      await ctx.reply(
+        text.length > MAX_MSG ? text.slice(0, MAX_MSG) + '…' : text,
+        { reply_markup: await this.mainKeyboardForUser(ctx) },
+      );
+    });
+
+    this.bot.command('trades_export', async (ctx) => {
+      if (!(await this.requireAdmin(ctx))) return;
+      const parts = ctx.message?.text?.trim().split(/\s+/);
+      let maxRows = 5000;
+      if (parts?.[1] && /^\d+$/.test(parts[1])) {
+        maxRows = Math.min(8000, Math.max(1, parseInt(parts[1], 10)));
+      }
+      const bundle = await this.tradeExport.buildBundle(maxRows);
+      const json = this.tradeExport.buildJsonPretty(bundle);
+      const buf = Buffer.from(json, 'utf8');
+      const name = `trades-export-${bundle.meta.generatedAt.slice(0, 10)}.json`;
+      const cap = bundle.meta.truncated
+        ? `Усечено до ${maxRows} записей (есть более старые в БД).`
+        : `Записей: ${bundle.meta.rowCount}.`;
+      await ctx.replyWithDocument(new InputFile(buf, name), {
+        caption: cap,
+        reply_markup: await this.mainKeyboardForUser(ctx),
+      });
+    });
 
     this.bot.hears(BTN_AUTO_ON, async (ctx) => {
       if (!(await this.requireAdmin(ctx))) return;
@@ -193,7 +235,12 @@ export class TelegramService
         { command: 'start', description: 'Меню и кнопки' },
         { command: 'menu', description: 'Показать клавиатуру' },
         { command: 'stats', description: 'Статистика' },
+        { command: 'market', description: 'Свечи: 24h/7d/30d по паре Spot' },
         { command: 'autotrade', description: 'Автоторговля (админ)' },
+        {
+          command: 'trades_export',
+          description: 'Экспорт сделок JSON (админ)',
+        },
       ])
       .then(() =>
         this.logger.log(

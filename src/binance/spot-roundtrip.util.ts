@@ -64,6 +64,59 @@ export function priceHitsStopLoss(params: {
   return markPrice <= threshold;
 }
 
+/** Макс. марк-цена по открытой позиции (монотонный пик). */
+export function computePeakMarkPrice(params: {
+  trackedBtc: number;
+  prevPeakMarkUsdt: number;
+  markPrice: number;
+}): number {
+  const { trackedBtc, prevPeakMarkUsdt, markPrice } = params;
+  if (!(trackedBtc > 0) || !(markPrice > 0)) return 0;
+  if (prevPeakMarkUsdt > 0) {
+    return Math.max(prevPeakMarkUsdt, markPrice);
+  }
+  return markPrice;
+}
+
+/**
+ * Аварийный выход: цена упала на drawdownPercent % от пика (пик > 0).
+ * drawdownPercent > 0.
+ */
+export function priceHitsEmergencyDrawdown(params: {
+  markPrice: number;
+  peakMarkUsdt: number;
+  drawdownPercent: number;
+}): boolean {
+  const { markPrice, peakMarkUsdt, drawdownPercent } = params;
+  if (!(drawdownPercent > 0) || !(peakMarkUsdt > 0) || !(markPrice > 0)) {
+    return false;
+  }
+  const threshold = peakMarkUsdt * (1 - drawdownPercent / 100);
+  return markPrice <= threshold;
+}
+
+/**
+ * Уменьшение quote при высокой волатильности (stdev доходностей 1h, п.п.).
+ */
+export function scaleQuoteByVolatility(params: {
+  maxQuoteUsdt: number;
+  /** Текущая σ за 24h (п.п.); если NaN — без масштабирования */
+  returnStdevPp: number;
+  refStdevPp: number;
+  minScale: number;
+  enabled: boolean;
+}): number {
+  const { maxQuoteUsdt, returnStdevPp, refStdevPp, minScale, enabled } = params;
+  if (!enabled || !Number.isFinite(returnStdevPp) || returnStdevPp <= 0) {
+    return maxQuoteUsdt;
+  }
+  const ref = Math.max(refStdevPp, 1e-9);
+  const factor = Math.min(1, ref / returnStdevPp);
+  const floor = Math.max(0, Math.min(1, minScale));
+  const scaled = maxQuoteUsdt * Math.max(floor, factor);
+  return Number(scaled.toFixed(8));
+}
+
 /** После BUY: новая средняя и tracked BTC. */
 export function applyBuyFill(params: {
   trackedBtc: number;

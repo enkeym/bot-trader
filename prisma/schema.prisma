@@ -47,5 +47,7 @@ model BotState {
   spotTrackedBtc     Decimal @default(0) @db.Decimal(18, 8)
   /// Средневзвешенная цена входа (USDT за 1 BTC); 0 если позиции нет
   spotAvgEntryUsdt   Decimal @default(0) @db.Decimal(18, 8)
+  /// Макс. марк-цена с момента входа (для аварийного выхода от пика); 0 без позиции
+  spotRoundtripPeakMarkUsdt Decimal @default(0) @db.Decimal(18, 8)
   updatedAt          DateTime @updatedAt
 }

@@ -194,9 +194,11 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       const reason =
         exitKind === 'stop_loss'
           ? ' (стоп-лосс — цена ниже средней покупки)'
-          : exitKind === 'take_profit'
-            ? ' (тейк-профит)'
-            : '';
+          : exitKind === 'emergency_drawdown'
+            ? ' (аварийный выход — просадка от пика марка)'
+            : exitKind === 'take_profit'
+              ? ' (тейк-профит)'
+              : '';
       let line = `Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT${reason}`;
       if (rtp != null && Number.isFinite(rtp)) {
         const cost = usdt - rtp;

@@ -134,7 +134,17 @@ make down
 - **Нет**, если вы только смотрите спред и включаете **симуляцию** с `DRY_RUN=true` — используется **публичный** endpoint поиска объявлений P2P, ключи не передаются.
 - **Да**, для **Spot** создайте ключи в аккаунте Binance → **API Management**, укажите в `.env` `BINANCE_API_KEY` / `BINANCE_API_SECRET`, выставьте `DRY_RUN=false`. Исполнение — **рыночный ордер** по паре `BINANCE_SPOT_SYMBOL` (по умолчанию `BTCUSDT`); сигнал стратегии — по **P2P-спреду** USDT/RUB и риск-фильтру (это не арбитраж Spot↔P2P).
 
-**Стратегия Spot:** по умолчанию `BINANCE_SPOT_STRATEGY=fixed_side` — одна сторона (`BINANCE_SPOT_ORDER_SIDE`, обычно BUY). Режим **`roundtrip`**: учёт позиции в БД (`BotState`), покупка до `BINANCE_SPOT_MAX_QUOTE_USDT`, продажа учётного объёма при **тейк-профите** (цена выше средней входа на `BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT`) или при **стоп-лоссе**, если задан `BINANCE_SPOT_ROUNDTRIP_STOP_LOSS_PERCENT` (цена ниже средней на N %). Лимит «набора» в USDT: `BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT` (не докупать сверх суммы). Без `BINANCE_SPOT_ROUNDTRIP_ACCUMULATE=true` при открытой позиции новых BUY нет — ждём TP или стоп. Перед покупкой проверяется свободный USDT. `DAILY_MAX_LOSS_USDT` в конфиге пока **не** отключает торговлю; дневной стоп по убытку в коде не реализован. Оценка по P2P в отчётах **не равна** реальному PnL на Spot.
+**Стратегия Spot (кратко):** по умолчанию `BINANCE_SPOT_STRATEGY=fixed_side` — одна сторона (`BINANCE_SPOT_ORDER_SIDE`, обычно BUY). Режим **`roundtrip`**: учёт позиции в БД (`BotState`), покупка до `BINANCE_SPOT_MAX_QUOTE_USDT` (с опциональным **масштабом от волатильности**), продажа учётного объёма при **тейк-профите** (цена выше средней входа на `BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT`), при **стоп-лоссе** от средней (`BINANCE_SPOT_ROUNDTRIP_STOP_LOSS_PERCENT`), либо при **аварийном выходе от пика марка** (`BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT` — просадка от максимума марка с момента входа). Приоритет метки выхода на SELL: стоп от средней → аварийный от пика → тейк. Лимит позиции: `BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT`. Без `BINANCE_SPOT_ROUNDTRIP_ACCUMULATE=true` при открытой позиции новых BUY нет — ждём выхода. Опционально: не открывать BUY при слишком высокой волатильности или росте за 24h (`BINANCE_SPOT_SKIP_BUY_*`). Перед покупкой проверяется свободный USDT.
+
+**Риски и лимиты:** `DAILY_MAX_LOSS_USDT` и `MAX_DAILY_SPOT_TRADES` ограничивают автоторговлю по суткам UTC (см. раздел «Ограничения…»). Оценка по P2P в отчётах **не равна** реальному PnL на Spot.
+
+**Публичные свечи:** команда `/market` и внутренние фильтры используют `GET /api/v3/klines` (без ключей) на `BINANCE_SPOT_BASE_URL`; кэш `MARKET_STATS_CACHE_TTL_SEC` (и Redis при наличии).
+
+### Журнал возможностей (для разработки)
+
+- **Roundtrip:** пик марка в БД (`spotRoundtripPeakMarkUsdt`), аварийный выход, фильтры BUY по σ/росту 24h, масштаб quote от волатильности.
+- **Telegram:** `/market` — сводка 24h / 7d / 30d по паре Spot; `/trades_export` [N] — JSON экспорт сделок из БД (только админ).
+- **Тесты:** утилиты `market-stats.util`, `spot-roundtrip.util` (часть логики roundtrip).
 
 ### Как создать API Key на Binance
 
@@ -248,6 +258,8 @@ REDIS_URL=redis://127.0.0.1:6379
 | `/start`                     | Текст + **постоянная клавиатура**: «Статистика»; для пользователей из `ADMIN_TELEGRAM_IDS` — «Включить/Выключить автоторговлю» |
 | `/menu`                      | Снова показать клавиатуру                                                                                                      |
 | `/статистика` или `/stats`   | Сводка: режим, баланс, оценки, последние операции                                                                              |
+| `/market`                    | Публичные свечи Binance по `BINANCE_SPOT_SYMBOL`: изменение/диапазон/σ за 24h, 7d, 30d и эвристика осторожности (не совет)     |
+| `/trades_export` [N]         | Файл JSON: история сделок из БД (до N≤8000 записей, по умолчанию 5000). **Только админ**                                        |
 | `/autotrade on\|off\|status` | То же, что кнопки (только админ). Интервал тика: `AUTO_TRADE_INTERVAL_MS`                                                      |
 
 **P2P** (объявления, банковские переводы) по API **не** автоматизируются. **Spot** — подписанные MARKET-ордера при `DRY_RUN=false` и заданных API-ключах.

@@ -50,6 +50,28 @@ export default () => ({
     roundtripMaxPositionUsdt: parseFloat(
       process.env.BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT ?? '0',
     ),
+    /** 0 = выкл. Продажа, если цена упала на N % от пика марка с момента входа (раньше глубокого SL). */
+    roundtripEmergencyDrawdownPercent: parseFloat(
+      process.env.BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT ?? '0',
+    ),
+    /** 0 = выкл. Не BUY, если σ доходностей 1h за 24h выше порога (п.п.). */
+    skipBuyVolatilityStdevGt: parseFloat(
+      process.env.BINANCE_SPOT_SKIP_BUY_VOLATILITY_STDDEV_GT ?? '0',
+    ),
+    /** 0 = выкл. Не BUY, если рост close за 24h выше N % (перегрев). */
+    skipBuyChange24hGt: parseFloat(
+      process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_24H_GT ?? '0',
+    ),
+    quoteVolatilityScaleEnabled:
+      process.env.BINANCE_SPOT_QUOTE_VOLATILITY_SCALE === 'true',
+    /** Референсная σ (п.п.) для масштаба: при σ выше рынка quote уменьшается */
+    quoteVolatilityRefStdevPp: parseFloat(
+      process.env.BINANCE_SPOT_QUOTE_VOLATILITY_REF_STDDEV_PP ?? '0.2',
+    ),
+    /** Нижняя граница множителя к max quote (0.25 = не ниже 25% от лимита) */
+    quoteVolatilityMinScale: parseFloat(
+      process.env.BINANCE_SPOT_QUOTE_VOLATILITY_MIN_SCALE ?? '0.25',
+    ),
     /** Окно допустимого сдвига timestamp для подписанных запросов (мс), макс. 60000 */
     recvWindowMs: Math.min(
       60_000,
@@ -94,5 +116,9 @@ export default () => ({
     startingWalletUsdt: parseFloat(
       process.env.PAPER_WALLET_START_USDT ?? '10000',
     ),
+  },
+  /** Кэш публичной статистики свечей (market) для Telegram / внутренних проверок */
+  marketStats: {
+    cacheTtlSec: parseInt(process.env.MARKET_STATS_CACHE_TTL_SEC ?? '120', 10),
   },
 });
