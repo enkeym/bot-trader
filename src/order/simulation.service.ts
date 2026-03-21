@@ -422,6 +422,13 @@ export class SimulationService {
             lines.push(
               '(Обычно это расхождение часов с Binance; в приложении время синхронизируется с api/v3/time. При повторе ошибки проверьте системные часы или WSL: `wsl --shutdown` и перезапуск.)',
             );
+          } else if (
+            bal.error.includes('Invalid API-key') ||
+            bal.error.includes('permissions for action')
+          ) {
+            lines.push(
+              '(Binance −2015: ключ/секрет, права (Reading + Spot), whitelist IP — или неверная база URL: ключи с testnet.binance.vision работают только с BINANCE_SPOT_BASE_URL=https://testnet.binance.vision; ключи с binance.com — с https://api.binance.com.)',
+            );
           }
         } else {
           const u = bal.balances.find((b) => b.asset === 'USDT');

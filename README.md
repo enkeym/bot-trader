@@ -150,7 +150,7 @@ BINANCE_API_KEY=ваш_api_key
 BINANCE_API_SECRET=ваш_secret
 ```
 
-База Spot по умолчанию — `https://api.binance.com`; при необходимости задайте `BINANCE_SPOT_BASE_URL` в `.env`. Шаблон — [.env.example](.env.example).
+База Spot по умолчанию — `https://api.binance.com`. Ключи с **Spot Testnet** ([testnet.binance.vision](https://testnet.binance.vision)) работают только с `BINANCE_SPOT_BASE_URL=https://testnet.binance.vision` — иначе Binance вернёт −2015 «Invalid API-key…». Шаблон — [.env.example](.env.example).
 
 **Безопасность:**
 
@@ -213,7 +213,7 @@ REDIS_URL=redis://127.0.0.1:6379
 | `PORT` | Порт HTTP (по умолчанию 3000) |
 | `REDIS_URL` | Опционально, Redis |
 | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | Ключи Spot из [Binance API Management](https://www.binance.com/en/my/settings/api-management) |
-| `BINANCE_SPOT_BASE_URL` | Опционально; по умолчанию `https://api.binance.com` |
+| `BINANCE_SPOT_BASE_URL` | Продакшен: `https://api.binance.com` (по умолчанию). Testnet-ключи: `https://testnet.binance.vision` |
 | `BINANCE_SPOT_SYMBOL`, `BINANCE_SPOT_ORDER_SIDE`, `BINANCE_SPOT_MAX_QUOTE_USDT`, `BINANCE_SPOT_QUANTITY` | Параметры MARKET-ордера (см. [.env.example](.env.example)) |
 | `DRY_RUN` | `true` — только запись `SIMULATED` в БД; `false` — при прохождении риска и наличии ключей — Spot API |
 | `EXECUTION_MODE` | `AUTO_EXCHANGE_ONLY` или `REQUIRE_HUMAN_BANK_CONFIRM` — см. [docs/MVP.md](docs/MVP.md) |

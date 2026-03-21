@@ -24,6 +24,9 @@ export class TelegramService
   private readonly logger = new Logger(TelegramService.name);
   private bot?: Bot;
 
+  /** Защита от двойной отправки статистики на один update (дубли handlers / два polling). */
+  private readonly statsUpdateIdsHandled = new Set<number>();
+
   constructor(
     private readonly config: ConfigService,
     private readonly simulation: SimulationService,
@@ -48,6 +51,13 @@ export class TelegramService
       return;
     }
 
+    if (this.bot) {
+      this.logger.warn(
+        'Telegram: повторный onApplicationBootstrap — бот уже создан, пропуск (иначе дублируются ответы)',
+      );
+      return;
+    }
+
     this.bot = new Bot(token);
 
     this.bot.catch((err) => {
@@ -59,6 +69,14 @@ export class TelegramService
     });
 
     const statsHandler = async (ctx: Context) => {
+      const uid = ctx.update.update_id;
+      if (this.statsUpdateIdsHandled.has(uid)) {
+        this.logger.debug(`stats: update ${uid} уже обработан, пропуск`);
+        return;
+      }
+      this.statsUpdateIdsHandled.add(uid);
+      setTimeout(() => this.statsUpdateIdsHandled.delete(uid), 120_000);
+
       if (!(await this.requireAccess(ctx))) return;
       const text = await this.simulation.buildTelegramTradingReport();
       await ctx.reply(
@@ -86,12 +104,10 @@ export class TelegramService
       });
     });
 
-    this.bot.command('статистика', statsHandler);
-    this.bot.command('stats', statsHandler);
+    /** Одна регистрация на обе команды — меньше риска двойного срабатывания. */
+    this.bot.command(['stats', 'статистика'], statsHandler);
 
-    this.bot.hears(BTN_STATS, async (ctx) => {
-      await statsHandler(ctx);
-    });
+    this.bot.hears(BTN_STATS, statsHandler);
 
     this.bot.hears(BTN_AUTO_ON, async (ctx) => {
       if (!(await this.requireAdmin(ctx))) return;
@@ -226,6 +242,7 @@ export class TelegramService
 
   async onModuleDestroy() {
     await this.bot?.stop();
+    this.bot = undefined;
   }
 
   async sendAlert(text: string) {

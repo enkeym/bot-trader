@@ -43,69 +43,69 @@ help:
 # --- Docker ---
 
 up:
-	$(COMPOSE) up -d --build
+	@$(COMPOSE) up -d --build
 
 infra:
-	$(COMPOSE) up -d postgres redis
+	@$(COMPOSE) up -d postgres redis
 
 down:
-	$(COMPOSE) down
+	@$(COMPOSE) down
 
 restart:
-	$(COMPOSE) restart
+	@$(COMPOSE) restart
 
 rebuild:
-	$(COMPOSE) pull
-	$(COMPOSE) up -d --force-recreate
+	@$(COMPOSE) pull
+	@$(COMPOSE) up -d --force-recreate
 
 destroy:
-	$(COMPOSE) down -v
+	@$(COMPOSE) down -v
 
 logs:
-	$(COMPOSE) logs -f
+	@$(COMPOSE) logs -f
 
 ps:
-	$(COMPOSE) ps
+	@$(COMPOSE) ps
 
 # --- App ---
 
 install:
-	npm install
+	@npm install
 
 build:
-	npm run build
+	@npm run build
 
 dev:
-	npm run start:dev
+	@npm run start:dev
 
 prod: build
-	npm run start:prod
+	@npm run start:prod
 
 start: infra
 	@echo "Ожидание Postgres..."
 	@$(SLEEP_DB)
-	npx prisma migrate deploy
-	npm run start:dev
+	@npx prisma migrate deploy
+	@npm run start:dev
 
 migrate:
-	npx prisma migrate deploy
+	@npx prisma migrate deploy
 
 migrate-dev:
-	npx prisma migrate dev
+	@npx prisma migrate dev
 
 prisma-generate:
-	npm run prisma:generate
+	@npm run prisma:generate
 
 # --- Clean ---
 
 clean:
-	rm -rf dist
+	@rm -rf dist
 
 clean-all: clean
-	rm -rf node_modules
+	@rm -rf node_modules
 
 lint:
-	npm run lint
+	@npm run lint
 
 test:
-	npm test
+	@npm test
