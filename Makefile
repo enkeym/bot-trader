@@ -2,7 +2,7 @@
 # Требуется: Docker, Node 20+, npm. Скопируйте .env из .env.example.
 
 .PHONY: help up infra down restart rebuild destroy logs ps \
-	install build dev prod start \
+	install build dev prod start app \
 	migrate migrate-dev prisma-generate \
 	clean clean-all lint test
 
@@ -24,8 +24,9 @@ help:
 	@echo ""
 	@echo "  Приложение:"
 	@echo "    make install     — npm install"
-	@echo "    make dev         — только бот (nest --watch), БД должна быть запущена"
-	@echo "    make start       — infra + миграции + npm run start:dev (бот на хосте, не Docker)"
+	@echo "    make dev         — только nest --watch (БД уже доступна по DATABASE_URL)"
+	@echo "    make start       — Docker: postgres+redis + миграции + start:dev (нужен docker compose)"
+	@echo "    make app         — без Docker: миграции + start:dev (PostgreSQL по DATABASE_URL в .env)"
 	@echo "    make prod        — build + start:prod"
 	@echo "    make build       — nest build"
 	@echo ""
@@ -84,6 +85,11 @@ prod: build
 start: infra
 	@echo "Ожидание Postgres..."
 	@$(SLEEP_DB)
+	@npx prisma migrate deploy
+	@npm run start:dev
+
+# Без Docker: PostgreSQL (и при необходимости Redis) вы поднимаете сами; строки в .env
+app:
 	@npx prisma migrate deploy
 	@npm run start:dev
 

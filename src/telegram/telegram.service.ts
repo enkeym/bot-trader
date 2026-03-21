@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { Bot, Context, Keyboard } from 'grammy';
 import { AutoTradeService } from '../autotrade/auto-trade.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { SimulationService } from '../order/simulation.service';
 import { TonService } from '../ton/ton.service';
 
@@ -24,8 +25,8 @@ export class TelegramService
   private readonly logger = new Logger(TelegramService.name);
   private bot?: Bot;
 
-  /** Защита от двойной отправки статистики на один update (дубли handlers / два polling). */
-  private readonly statsUpdateIdsHandled = new Set<number>();
+  /** Если Redis нет — только в рамках одного процесса (два инстанса без Redis всё ещё дублируют). */
+  private readonly claimedUpdateIdsLocal = new Set<number>();
 
   constructor(
     private readonly config: ConfigService,
@@ -33,6 +34,7 @@ export class TelegramService
     private readonly prisma: PrismaService,
     private readonly ton: TonService,
     private readonly autoTrade: AutoTradeService,
+    private readonly redis: RedisService,
   ) {}
 
   onApplicationBootstrap() {
@@ -60,6 +62,23 @@ export class TelegramService
 
     this.bot = new Bot(token);
 
+    /**
+     * Самый первый middleware: один update_id = один проход по цепочке.
+     * Два процесса с одним токеном (PM2 cluster, два контейнера) иначе оба отвечают —
+     * при REDIS_URL дедуп через SET NX общий для всех инстансов.
+     */
+    this.bot.use(async (ctx, next) => {
+      const id = ctx.update.update_id;
+      const claimed = await this.claimUpdateOnce(id);
+      if (!claimed) {
+        this.logger.warn(
+          `Telegram: update_id=${id} уже обработан — пропуск (второй инстанс бота или повтор; задайте REDIS_URL для общего кэша)`,
+        );
+        return;
+      }
+      await next();
+    });
+
     this.bot.catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(
@@ -69,16 +88,6 @@ export class TelegramService
     });
 
     const statsHandler = async (ctx: Context) => {
-      const uid = ctx.update.update_id;
-      if (this.statsUpdateIdsHandled.has(uid)) {
-        this.logger.warn(
-          `Telegram: update_id=${uid} — статистика уже отправлена, второй ответ отменён`,
-        );
-        return;
-      }
-      this.statsUpdateIdsHandled.add(uid);
-      setTimeout(() => this.statsUpdateIdsHandled.delete(uid), 120_000);
-
       if (!(await this.requireAccess(ctx))) return;
       const text = await this.simulation.buildTelegramTradingReport();
       await ctx.reply(
@@ -253,6 +262,26 @@ export class TelegramService
   async onModuleDestroy() {
     await this.bot?.stop();
     this.bot = undefined;
+  }
+
+  /** true = мы первые «захватили» апдейт, можно обрабатывать; false = дубликат. */
+  private async claimUpdateOnce(updateId: number): Promise<boolean> {
+    const client = this.redis.getClient();
+    if (client) {
+      try {
+        const key = `telegram:update_claim:${updateId}`;
+        const ok = await client.set(key, '1', 'EX', 600, 'NX');
+        return ok === 'OK';
+      } catch (e) {
+        this.logger.warn(
+          `Telegram: Redis claim failed (${e instanceof Error ? e.message : String(e)}), локальный кэш`,
+        );
+      }
+    }
+    if (this.claimedUpdateIdsLocal.has(updateId)) return false;
+    this.claimedUpdateIdsLocal.add(updateId);
+    setTimeout(() => this.claimedUpdateIdsLocal.delete(updateId), 600_000);
+    return true;
   }
 
   async sendAlert(text: string) {
