@@ -6,8 +6,13 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { BinanceSpotService } from '../binance/binance-spot.service';
 import { AuditService } from '../audit/audit.service';
-import { SimulationService } from '../order/simulation.service';
+import {
+  SimPayload,
+  SpotLivePayload,
+  SimulationService,
+} from '../order/simulation.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 const BOT_STATE_ID = 'default';
@@ -22,6 +27,7 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly simulation: SimulationService,
     private readonly audit: AuditService,
+    private readonly binanceSpot: BinanceSpotService,
   ) {}
 
   async onModuleInit() {
@@ -32,7 +38,9 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     });
     const ms = this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
     this.intervalRef = setInterval(() => void this.tick(), ms);
-    this.logger.log(`Auto-trade tick каждые ${ms} ms (бумага / DRY_RUN)`);
+    this.logger.log(
+      `Auto-trade tick каждые ${ms} ms (DRY_RUN=бумага; при DRY_RUN=false + ключи — Spot Binance)`,
+    );
   }
 
   onModuleDestroy() {
@@ -73,11 +81,6 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       this.config.get<number>('strategy.maxNotionalUsdt') ?? 500;
     const dryRun = this.config.get<boolean>('dryRun') ?? true;
 
-    if (!dryRun) {
-      await this.audit.log('warn', 'autotrade_skipped_not_dry_run', {});
-      return;
-    }
-
     try {
       const res = await this.simulation.runPairSimulation(maxNotional);
       if (!res.ok || !res.orderCreated || !res.order) return;
@@ -87,23 +90,101 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
         (await this.getState()).notifyChatId;
       if (!chatId) return;
 
-      const profit =
-        res.estimatedProfitUsdt != null
-          ? `~${res.estimatedProfitUsdt} USDT (оценка)`
-          : '—';
-      await this.sendTelegram(
-        chatId,
-        [
-          '[Авто-симуляция] новая запись SIMULATED',
-          `OrderIntent: ${res.order.id}`,
-          `Прибыль (бумага): ${profit}`,
-          'Реальной сделки на Binance нет (DRY_RUN).',
-        ].join('\n'),
-      );
+      const text = await this.buildTradeNotification(res, dryRun);
+      await this.sendTelegram(chatId, text);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.warn(`autotrade tick: ${msg}`);
     }
+  }
+
+  private async buildTradeNotification(
+    res: Awaited<ReturnType<SimulationService['runPairSimulation']>>,
+    dryRun: boolean,
+  ): Promise<string> {
+    const o = res.order;
+    if (!o) return '';
+
+    if (dryRun && o.status === 'SIMULATED') {
+      const p = o.payload as SimPayload | null;
+      const est = p?.estimatedProfitUsdt;
+      return [
+        '🔔 Автоторговля — бумага (DRY_RUN, реальной сделки нет)',
+        `Пара P2P (сигнал): ${this.config.get<string>('market.asset') ?? 'USDT'}/${this.config.get<string>('market.fiat') ?? 'RUB'}`,
+        `Чистый спред: ${p?.netSpreadPercent != null ? `${p.netSpreadPercent.toFixed(3)}%` : '—'}`,
+        `Оценка прибыли за цикл: ${est != null ? `${est >= 0 ? '+' : ''}${est.toFixed(4)} USDT` : '—'}`,
+        `Объём в расчёте (notional): ${p?.notionalUsdt ?? '—'} USDT`,
+        `Запись в БД: ${o.id}`,
+      ].join('\n');
+    }
+
+    const pl = o.payload as SpotLivePayload | null;
+    const sym = pl?.spot?.symbol ?? '—';
+    const side = pl?.spot?.side ?? '—';
+
+    if (o.status === 'FAILED') {
+      return [
+        '🔔 Автоторговля — Spot Binance ❌',
+        `Пара: ${sym}, сторона: ${side}`,
+        `Ошибка: ${pl?.error ?? '—'}`,
+        `Оценка сигнала (P2P): ${pl?.estimatedStrategyPnlUsdt != null ? `${pl.estimatedStrategyPnlUsdt >= 0 ? '+' : ''}${pl.estimatedStrategyPnlUsdt.toFixed(4)} USDT` : '—'}`,
+        `Запись: ${o.id}`,
+      ].join('\n');
+    }
+
+    const ex = pl?.exchangeResponse ?? {};
+    const oid = ex['orderId'];
+    const oidStr =
+      oid === undefined || oid === null
+        ? '—'
+        : typeof oid === 'object'
+          ? JSON.stringify(oid)
+          : typeof oid === 'bigint'
+            ? oid.toString()
+            : String(oid as string | number | boolean);
+    const execQty = ex['executedQty'];
+    const cumQ = ex['cummulativeQuoteQty'] ?? ex['cumQuote'];
+    const qtyStr =
+      typeof execQty === 'string' || typeof execQty === 'number'
+        ? String(execQty)
+        : '—';
+    const quoteStr =
+      typeof cumQ === 'string' || typeof cumQ === 'number' ? String(cumQ) : '—';
+
+    const lines = [
+      '🔔 Автоторговля — Spot Binance ✅',
+      `Сделка: ${sym} ${side} (MARKET)`,
+      `Исполнено базы: ${qtyStr}`,
+      `Стоимость в котируемой (USDT): ${quoteStr}`,
+      `Order ID биржи: ${oidStr}`,
+      `Оценка сигнала по P2P (не реализ. PnL): ${pl?.estimatedStrategyPnlUsdt != null ? `${pl.estimatedStrategyPnlUsdt >= 0 ? '+' : ''}${pl.estimatedStrategyPnlUsdt.toFixed(4)} USDT` : '—'}`,
+    ];
+
+    const bal = await this.binanceSpot.getAccountBalances();
+    if (bal.ok) {
+      const spotSym =
+        this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
+      const base = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '');
+      const u = bal.balances.find((b) => b.asset === 'USDT');
+      const b = bal.balances.find((x) => x.asset === base);
+      if (u) {
+        const total = parseFloat(u.free) + parseFloat(u.locked);
+        lines.push(
+          `Счёт USDT на бирже: ${total.toFixed(4)} (free ${u.free}, lock ${u.locked})`,
+        );
+      }
+      if (b) {
+        const t = parseFloat(b.free) + parseFloat(b.locked);
+        lines.push(
+          `Счёт ${base} на бирже: ${t.toFixed(8)} (free ${b.free}, lock ${b.locked})`,
+        );
+      }
+    } else {
+      lines.push(`Баланс не подтянут: ${bal.error}`);
+    }
+
+    lines.push(`Запись: ${o.id}`);
+    return lines.join('\n');
   }
 
   private async sendTelegram(chatId: string, text: string) {

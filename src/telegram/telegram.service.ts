@@ -1,237 +1,238 @@
 import {
   Injectable,
   Logger,
+  OnApplicationBootstrap,
   OnModuleDestroy,
-  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Bot, Context } from 'grammy';
+import { Bot, Context, Keyboard } from 'grammy';
 import { AutoTradeService } from '../autotrade/auto-trade.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SimulationService } from '../order/simulation.service';
-import { SpreadService } from '../strategy/spread.service';
 import { TonService } from '../ton/ton.service';
 
+const MAX_MSG = 4000;
+
+const BTN_STATS = '📊 Статистика';
+const BTN_AUTO_ON = '▶️ Включить автоторговлю';
+const BTN_AUTO_OFF = '⏹ Выключить автоторговлю';
+
 @Injectable()
-export class TelegramService implements OnModuleInit, OnModuleDestroy {
+export class TelegramService
+  implements OnApplicationBootstrap, OnModuleDestroy
+{
   private readonly logger = new Logger(TelegramService.name);
   private bot?: Bot;
 
   constructor(
     private readonly config: ConfigService,
-    private readonly spread: SpreadService,
     private readonly simulation: SimulationService,
     private readonly prisma: PrismaService,
     private readonly ton: TonService,
     private readonly autoTrade: AutoTradeService,
   ) {}
 
-  async onModuleInit() {
+  onApplicationBootstrap() {
+    this.logger.log('Telegram: onApplicationBootstrap');
     if (process.env.NODE_ENV === 'test') {
-      this.logger.warn('Telegram disabled in NODE_ENV=test');
+      this.logger.warn('Telegram disabled (NODE_ENV=test)');
       return;
     }
-    const token = this.config.get<string>('telegramBotToken');
+    const token =
+      this.config.get<string>('telegramBotToken')?.trim() ||
+      process.env.TELEGRAM_BOT_TOKEN?.trim();
     if (!token) {
-      this.logger.warn('TELEGRAM_BOT_TOKEN missing — Telegram disabled');
+      this.logger.warn(
+        'TELEGRAM_BOT_TOKEN пуст — Telegram выключен (проверьте .env / env в Docker)',
+      );
       return;
     }
+
     this.bot = new Bot(token);
+
+    this.bot.catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Telegram: ${msg}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+    });
+
+    const statsHandler = async (ctx: Context) => {
+      if (!(await this.requireAccess(ctx))) return;
+      const text = await this.simulation.buildTelegramTradingReport();
+      await ctx.reply(
+        text.length > MAX_MSG ? text.slice(0, MAX_MSG) + '…' : text,
+        { reply_markup: await this.mainKeyboardForUser(ctx) },
+      );
+    };
 
     this.bot.command('start', async (ctx) => {
       await this.upsertUser(ctx);
       await ctx.reply(
         [
-          'Trader P2P (MVP)',
-          '/spread — спред USDT/RUB (Binance P2P)',
-          '/simulate — симуляция (DRY_RUN), оценка прибыли в USDT',
-          '/paper — накопленная бумажная статистика',
-          '/stats — бумажный кошелёк, PnL, последние сделки',
-          '/status — режим',
-          '/connect — TON Connect манифест',
-          '/autotrade on|off|status — авто-симуляция по таймеру (только админы)',
+          'Трейдер Binance Spot + сигнал по P2P-спреду.',
+          '',
+          'Кнопки ниже — статистика и (для админа) автоторговля.',
+          'Команды: /stats, /autotrade',
         ].join('\n'),
+        { reply_markup: await this.mainKeyboardForUser(ctx) },
       );
     });
 
+    this.bot.command('menu', async (ctx) => {
+      await ctx.reply('Меню:', {
+        reply_markup: await this.mainKeyboardForUser(ctx),
+      });
+    });
+
+    this.bot.command('статистика', statsHandler);
+    this.bot.command('stats', statsHandler);
+
+    this.bot.hears(BTN_STATS, async (ctx) => {
+      await statsHandler(ctx);
+    });
+
+    this.bot.hears(BTN_AUTO_ON, async (ctx) => {
+      if (!(await this.requireAdmin(ctx))) return;
+      const chatId = String(ctx.chat?.id ?? ctx.from?.id ?? '');
+      await this.autoTrade.setEnabled(true, chatId);
+      await ctx.reply('Автоторговля включена.', {
+        reply_markup: await this.mainKeyboardForUser(ctx),
+      });
+    });
+
+    this.bot.hears(BTN_AUTO_OFF, async (ctx) => {
+      if (!(await this.requireAdmin(ctx))) return;
+      await this.autoTrade.setEnabled(false);
+      await ctx.reply('Автоторговля выключена.', {
+        reply_markup: await this.mainKeyboardForUser(ctx),
+      });
+    });
+
     this.bot.command('autotrade', async (ctx) => {
-      const admins = this.config.get<string[]>('adminTelegramIds') ?? [];
-      if (admins.length === 0) {
-        await ctx.reply(
-          'Задайте ADMIN_TELEGRAM_IDS в .env (ваш числовой user id через запятую).',
-        );
-        return;
-      }
-      const uid = ctx.from?.id;
-      if (uid == null || !admins.includes(String(uid))) {
-        await ctx.reply(
-          'Команда только для администраторов (ADMIN_TELEGRAM_IDS).',
-        );
-        return;
-      }
+      if (!(await this.requireAdmin(ctx))) return;
       const arg = ctx.message?.text?.trim().split(/\s+/)[1]?.toLowerCase();
-      const ms = this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
-      const dry = this.config.get<boolean>('dryRun');
 
       if (!arg || arg === 'status') {
         const st = await this.autoTrade.getState();
-        const notify =
-          this.config.get<string>('telegramAlertChatId') ??
-          st.notifyChatId ??
-          '—';
+        const dry = this.config.get<boolean>('dryRun');
+        const key = this.config.get<string>('binance.apiKey');
+        const hasKeys = Boolean(key?.trim());
+        const mode = dry
+          ? 'бумага (Spot не вызывается)'
+          : hasKeys
+            ? 'Spot Binance'
+            : 'нет API-ключей';
         await ctx.reply(
           [
-            `Авто-симуляция: ${st.autoTradeEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
-            `Интервал: ${ms} ms`,
-            `Уведомления → chat: ${notify}`,
-            `DRY_RUN=${dry} — на Binance ордера не отправляются, только запись SIMULATED в БД.`,
-            '',
-            'Реальная покупка по API в этом проекте не реализована.',
+            `Автоторговля: ${st.autoTradeEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
+            `Режим: ${mode}`,
           ].join('\n'),
+          { reply_markup: await this.mainKeyboardForUser(ctx) },
         );
         return;
       }
       if (arg === 'on') {
         const chatId = String(ctx.chat?.id ?? ctx.from?.id ?? '');
         await this.autoTrade.setEnabled(true, chatId);
-        await ctx.reply(
-          [
-            'Авто-симуляция включена: по таймеру вызывается та же логика, что /simulate.',
-            'Уведомление при новой записи: TELEGRAM_ALERT_CHAT_ID или этот чат.',
-          ].join('\n'),
-        );
+        await ctx.reply('Включено.', {
+          reply_markup: await this.mainKeyboardForUser(ctx),
+        });
         return;
       }
       if (arg === 'off') {
         await this.autoTrade.setEnabled(false);
-        await ctx.reply('Авто-симуляция выключена.');
+        await ctx.reply('Выключено.', {
+          reply_markup: await this.mainKeyboardForUser(ctx),
+        });
         return;
       }
       await ctx.reply('Использование: /autotrade on | off | status');
     });
 
-    this.bot.command('spread', async (ctx) => {
-      if (!(await this.requireAccess(ctx))) return;
-      const asset = this.config.get<string>('market.asset') ?? 'USDT';
-      const fiat = this.config.get<string>('market.fiat') ?? 'RUB';
-      const ev = await this.spread.evaluate(asset, fiat);
-      const lines = [
-        `Пара: ${asset}/${fiat}`,
-        `Лучшая покупка USDT (${fiat} за 1 USDT): ${ev.snapshot.bestBuyUsdtPrice ?? '—'}`,
-        `Лучшая продажа USDT (${fiat} за 1 USDT): ${ev.snapshot.bestSellUsdtPrice ?? '—'}`,
-        `Грубый спред: ${ev.grossSpreadPercent?.toFixed(3) ?? '—'}%`,
-        `Чистый спред: ${ev.netSpreadPercent?.toFixed(3) ?? '—'}%`,
-      ];
-      if (ev.snapshot.hint) {
-        lines.push('', ev.snapshot.hint);
-      }
-      await ctx.reply(lines.join('\n'));
-    });
-
-    this.bot.command('simulate', async (ctx) => {
-      if (!(await this.requireAccess(ctx))) return;
-      const maxNotional =
-        this.config.get<number>('strategy.maxNotionalUsdt') ?? 500;
-      const res = await this.simulation.runPairSimulation(maxNotional);
-      const profitLine =
-        res.estimatedProfitUsdt != null
-          ? `Оценка прибыли за цикл (бумага, USDT): ~${res.estimatedProfitUsdt} (notional × чистый спред %)`
-          : 'Оценка прибыли: — (спред ≤ 0 или нет данных)';
-      const lines = [
-        `Риск OK: ${res.ok}`,
-        profitLine,
-        `DRY_RUN: ${res.dryRun}`,
-        `EXECUTION_MODE: ${res.executionMode}`,
-        res.order
-          ? `OrderIntent: ${res.order.id} (${res.order.status})`
-          : 'OrderIntent: —',
-        '',
-        'Это не реальная прибыль: нет сделки на бирже и нет учёта комиссий/проскальзывания.',
-      ];
-      if (res.ev.snapshot.hint) {
-        lines.splice(1, 0, res.ev.snapshot.hint, '');
-      }
-      await ctx.reply(lines.join('\n'));
-    });
-
-    this.bot.command('paper', async (ctx) => {
-      if (!(await this.requireAccess(ctx))) return;
-      const s = await this.simulation.getPaperStats();
-      await ctx.reply(
-        [
-          'Бумажная статистика (SIMULATED в БД):',
-          `Записей симуляций: ${s.simulatedTrades}`,
-          `С оценкой прибыли: ${s.tradesWithEstimate}`,
-          `Сумма оценок прибыли (USDT): ~${s.totalEstimatedProfitUsdt}`,
-          '',
-          'Реальный TON не нужен; подключение кошелька не влияет на эти цифры.',
-        ].join('\n'),
+    // setMyCommands не должен блокировать start(): при недоступности api.telegram.org
+    // (сеть, РФ без VPN) await setMyCommands зависал — polling никогда не запускался.
+    void this.bot.api
+      .setMyCommands([
+        { command: 'start', description: 'Меню и кнопки' },
+        { command: 'menu', description: 'Показать клавиатуру' },
+        { command: 'stats', description: 'Статистика' },
+        { command: 'autotrade', description: 'Автоторговля (админ)' },
+      ])
+      .then(() =>
+        this.logger.log(
+          'Telegram: команды меню зарегистрированы (setMyCommands)',
+        ),
+      )
+      .catch((e) =>
+        this.logger.warn(
+          `Telegram setMyCommands не выполнен (бот всё равно работает): ${e}`,
+        ),
       );
-    });
 
-    this.bot.command('stats', async (ctx) => {
-      if (!(await this.requireAccess(ctx))) return;
-      const d = await this.simulation.getPaperDashboard();
-      const st = await this.autoTrade.getState();
-      const dry = this.config.get<boolean>('dryRun');
-      const fiat = this.config.get<string>('market.fiat') ?? 'RUB';
-      const asset = this.config.get<string>('market.asset') ?? 'USDT';
-      await ctx.reply(
-        [
-          '— Бумажный отчёт (не баланс Binance / не TON) —',
-          `Пара: ${asset}/${fiat} | DRY_RUN=${dry}`,
-          `Авто-симуляция: ${st.autoTradeEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,
-          '',
-          `Бумажный кошелёк: ${d.currentPaperWalletUsdt} USDT (старт ${d.startingPaperWalletUsdt}, см. PAPER_WALLET_START_USDT)`,
-          `Сделок SIMULATED: ${d.totalSimulatedTrades} (оценка прибыли >0: ${d.tradesWithPositiveEstimate})`,
-          `Суммарная оценка PnL: ${d.totalEstimatedPnLUsdt} USDT`,
-          '',
-          'Последние записи (время UTC):',
-          d.recentTradeLines.length > 0 ? d.recentTradeLines.join('\n') : '—',
-          '',
-          'Направление «в плюс» здесь = рос суммарный спред в симуляциях; это не гарантия реальной торговли.',
-        ].join('\n'),
+    this.logger.log(
+      'Telegram: bot.start() → HTTPS к api.telegram.org (deleteWebhook, потом long polling)',
+    );
+
+    const connWarn = setTimeout(() => {
+      this.logger.warn(
+        'Telegram: за 25 с нет ответа от API — из контейнера, вероятно, недоступен api.telegram.org. Варианты: VPN на хосте, HTTPS_PROXY для Docker, DNS 8.8.8.8, на WSL иногда мешает сеть Windows.',
       );
-    });
+    }, 25_000);
 
-    this.bot.command('status', async (ctx) => {
-      const dry = this.config.get<boolean>('dryRun');
-      const mode = this.config.get<string>('executionMode');
-      const min = this.config.get<number>('strategy.minSpreadPercent');
-      const st = await this.autoTrade.getState();
-      await ctx.reply(
-        [
-          `DRY_RUN=${dry}`,
-          `EXECUTION_MODE=${mode}`,
-          `MIN_SPREAD_PERCENT=${min}`,
-          `Авто-симуляция: ${st.autoTradeEnabled ? 'on' : 'off'}`,
-        ].join('\n'),
-      );
-    });
+    void this.bot
+      .start({
+        onStart: (info) => {
+          clearTimeout(connWarn);
+          this.logger.log(
+            `Telegram: polling OK, бот @${info.username} (id ${info.id})`,
+          );
+        },
+      })
+      .catch((err) => {
+        clearTimeout(connWarn);
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Telegram polling не запустился: ${msg}`);
+      });
 
-    this.bot.command('connect', async (ctx) => {
-      const base = this.config.get<string>('publicBaseUrl') ?? '';
-      await ctx.reply(
-        [
-          'TON Connect manifest (разместите приложение по HTTPS и укажите URL в TON_CONNECT_MANIFEST_URL):',
-          `${base}/tonconnect-manifest.json`,
-        ].join('\n'),
-      );
-    });
+    this.logger.log(
+      'Telegram: start() поставлен в очередь (не ждём setMyCommands)',
+    );
+  }
 
-    await this.bot.start();
-    this.logger.log('Telegram long polling started');
+  /** Клавиатура: статистика; для админа — одна кнопка вкл/выкл авто. */
+  private async mainKeyboardForUser(ctx: Context): Promise<Keyboard> {
+    const uid = ctx.from?.id;
+    const admins = this.config.get<string[]>('adminTelegramIds') ?? [];
+    const isAdmin =
+      uid != null && admins.length > 0 && admins.includes(String(uid));
+
+    if (!isAdmin) {
+      return new Keyboard().text(BTN_STATS).resized().persistent();
+    }
+
+    const st = await this.prisma.botState.findUnique({
+      where: { id: 'default' },
+    });
+    const on = st?.autoTradeEnabled ?? false;
+    return new Keyboard()
+      .text(BTN_STATS)
+      .row()
+      .text(on ? BTN_AUTO_OFF : BTN_AUTO_ON)
+      .resized()
+      .persistent();
   }
 
   async onModuleDestroy() {
     await this.bot?.stop();
   }
 
-  /** Опциональные алерты из cron (если задан TELEGRAM_ALERT_CHAT_ID). */
   async sendAlert(text: string) {
     const chatId = this.config.get<string>('telegramAlertChatId');
     if (!this.bot || !chatId) return;
-    await this.bot.api.sendMessage(chatId, text, {
+    const body = text.length > MAX_MSG ? text.slice(0, MAX_MSG) + '…' : text;
+    await this.bot.api.sendMessage(chatId, body, {
       disable_notification: false,
     });
   }
@@ -246,6 +247,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private async requireAdmin(ctx: Context): Promise<boolean> {
+    const admins = this.config.get<string[]>('adminTelegramIds') ?? [];
+    if (admins.length === 0) {
+      await ctx.reply('Задайте ADMIN_TELEGRAM_IDS в .env.');
+      return false;
+    }
+    const id = ctx.from?.id;
+    if (id == null || !admins.includes(String(id))) {
+      await ctx.reply('Нужны права администратора.');
+      return false;
+    }
+    return true;
+  }
+
   private async requireAccess(ctx: Context): Promise<boolean> {
     if (!this.ton.isAccessRequired()) return true;
     const id = ctx.from?.id;
@@ -256,7 +271,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       where: { telegramId: String(id) },
     });
     if (u?.accessPaid) return true;
-    await ctx.reply('Нужен доступ (TON). См. /connect');
+    await ctx.reply(
+      'Нужен доступ. Обратитесь к администратору или настройте TON в проекте.',
+    );
     return false;
   }
 }

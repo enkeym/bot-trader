@@ -46,7 +46,7 @@ export class BinanceC2cProvider implements P2PProvider {
     let hint: string | undefined;
     if (buyTop.length === 0 && sellTop.length === 0) {
       hint =
-        'Binance ответил успешно, но список объявлений пустой (data:[]). Для USDT/RUB так бывает при региональных ограничениях P2P или отсутствии контрагентов для вашего окружения. Проверка: curl в README. Для теста канала попробуйте в .env FIAT=USD (или EUR), перезапуск бота; либо смена сети/VPN.';
+        'Binance ответил успешно, но объявлений нет (data:[]). Так бывает для выбранной пары ASSET/FIAT, региональных ограничений P2P или отсутствия контрагентов. Проверьте пару в .env (FIAT/ASSET), другой FIAT (USD, EUR) или сеть/VPN.';
     }
 
     return {

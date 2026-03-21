@@ -14,6 +14,17 @@ export default () => ({
   binance: {
     apiKey: process.env.BINANCE_API_KEY,
     apiSecret: process.env.BINANCE_API_SECRET,
+    /** База Spot API; по умолчанию продакшен Binance */
+    spotBaseUrl: process.env.BINANCE_SPOT_BASE_URL ?? 'https://api.binance.com',
+    spotSymbol: process.env.BINANCE_SPOT_SYMBOL ?? 'BTCUSDT',
+    spotOrderSide:
+      (process.env.BINANCE_SPOT_ORDER_SIDE as 'BUY' | 'SELL') ?? 'BUY',
+    /** Потолок quote (USDT) на один MARKET BUY при DRY_RUN=false */
+    spotMaxQuoteUsdt: parseFloat(
+      process.env.BINANCE_SPOT_MAX_QUOTE_USDT ?? '20',
+    ),
+    /** Для MARKET SELL — объём в базовом активе (напр. BTC) */
+    spotQuantity: parseFloat(process.env.BINANCE_SPOT_QUANTITY ?? '0'),
   },
   dryRun: process.env.DRY_RUN !== 'false',
   executionMode:
