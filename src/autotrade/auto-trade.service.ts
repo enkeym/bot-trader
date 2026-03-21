@@ -18,13 +18,17 @@ import {
   parseSpotExchangeFill,
 } from '../order/balance-telegram.format';
 import { PrismaService } from '../prisma/prisma.service';
+import { RiskService } from '../risk/risk.service';
 
 const BOT_STATE_ID = 'default';
+const AUTOTRADE_SKIP_AUDIT_MS = 600_000;
 
 @Injectable()
 export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AutoTradeService.name);
   private intervalRef: ReturnType<typeof setInterval> | null = null;
+  private lastScheduleSkipAuditAt = 0;
+  private lastDailyLimitAuditAt = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -32,6 +36,7 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     private readonly simulation: SimulationService,
     private readonly audit: AuditService,
     private readonly binanceSpot: BinanceSpotService,
+    private readonly risk: RiskService,
   ) {}
 
   async onModuleInit() {
@@ -84,6 +89,31 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (!enabled) return;
+
+    const now = new Date();
+    if (!this.risk.isWithinAutotradeTradingSchedule(now)) {
+      const t = Date.now();
+      if (t - this.lastScheduleSkipAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
+        this.lastScheduleSkipAuditAt = t;
+        void this.audit.log('info', 'autotrade_skipped_trading_schedule', {
+          utc: now.toISOString(),
+        });
+      }
+      return;
+    }
+
+    const daily = await this.risk.checkAutotradeDailyLimits(now);
+    if (!daily.ok) {
+      const t = Date.now();
+      if (t - this.lastDailyLimitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
+        this.lastDailyLimitAuditAt = t;
+        void this.audit.log('info', 'autotrade_skipped_daily_limit', {
+          reason: daily.reason,
+          utc: now.toISOString(),
+        });
+      }
+      return;
+    }
 
     const maxNotional =
       this.config.get<number>('strategy.maxNotionalUsdt') ?? 500;
@@ -148,6 +178,7 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     const { baseQty, usdt } = parseSpotExchangeFill(ex);
     const side = pl?.spot?.side;
     const rtp = pl?.roundtrip?.realizedPnlUsdtEstimate;
+    const exitKind = pl?.roundtrip?.exitKind;
 
     const head = ['✅ Сделка на бирже', `Пара: ${pl?.spot?.symbol ?? spotSym}`];
 
@@ -160,7 +191,13 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       Number.isFinite(baseQty) &&
       Number.isFinite(usdt)
     ) {
-      let line = `Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT`;
+      const reason =
+        exitKind === 'stop_loss'
+          ? ' (стоп-лосс — цена ниже средней покупки)'
+          : exitKind === 'take_profit'
+            ? ' (тейк-профит)'
+            : '';
+      let line = `Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT${reason}`;
       if (rtp != null && Number.isFinite(rtp)) {
         const cost = usdt - rtp;
         const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';

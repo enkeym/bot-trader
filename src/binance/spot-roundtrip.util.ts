@@ -50,6 +50,20 @@ export function priceHitsTakeProfit(params: {
   return markPrice >= threshold;
 }
 
+/** Стоп-лосс: цена ниже средней на stopLossPercent % (stopLossPercent > 0). */
+export function priceHitsStopLoss(params: {
+  markPrice: number;
+  avgEntryUsdt: number;
+  stopLossPercent: number;
+}): boolean {
+  const { markPrice, avgEntryUsdt, stopLossPercent } = params;
+  if (!(stopLossPercent > 0) || !(avgEntryUsdt > 0) || !(markPrice > 0)) {
+    return false;
+  }
+  const threshold = avgEntryUsdt * (1 - stopLossPercent / 100);
+  return markPrice <= threshold;
+}
+
 /** После BUY: новая средняя и tracked BTC. */
 export function applyBuyFill(params: {
   trackedBtc: number;

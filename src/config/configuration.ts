@@ -39,6 +39,17 @@ export default () => ({
      */
     roundtripAccumulateOnSignal:
       process.env.BINANCE_SPOT_ROUNDTRIP_ACCUMULATE === 'true',
+    /** 0 = выкл. Иначе продать учётную позицию, если цена ниже средней на N % (ограничение убытка). */
+    roundtripStopLossPercent: parseFloat(
+      process.env.BINANCE_SPOT_ROUNDTRIP_STOP_LOSS_PERCENT ?? '0',
+    ),
+    /**
+     * 0 = выкл. Макс. «стоимость» учётной позиции в USDT (tracked × средняя цена);
+     * при докупках не даёт набирать позицию больше лимита.
+     */
+    roundtripMaxPositionUsdt: parseFloat(
+      process.env.BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT ?? '0',
+    ),
     /** Окно допустимого сдвига timestamp для подписанных запросов (мс), макс. 60000 */
     recvWindowMs: Math.min(
       60_000,
@@ -61,6 +72,8 @@ export default () => ({
     minSpreadPercent: parseFloat(process.env.MIN_SPREAD_PERCENT ?? '0.15'),
     maxNotionalUsdt: parseFloat(process.env.MAX_NOTIONAL_USDT ?? '500'),
     dailyMaxLossUsdt: parseFloat(process.env.DAILY_MAX_LOSS_USDT ?? '50'),
+    /** 0 = выкл. Макс. число исполненных Spot-ордеров за сутки (UTC). */
+    maxDailySpotTrades: parseInt(process.env.MAX_DAILY_SPOT_TRADES ?? '0', 10),
     takerFeePercent: parseFloat(process.env.P2P_TAKER_FEE_PERCENT ?? '0'),
   },
   ton: {
@@ -71,6 +84,10 @@ export default () => ({
   autoTrade: {
     /** Интервал тика авто-симуляции (мс), по умолчанию 3 мин */
     intervalMs: parseInt(process.env.AUTO_TRADE_INTERVAL_MS ?? '180000', 10),
+    /** UTC `08:00-21:00` или пусто = без фильтра по часам */
+    tradingWindowUtc: process.env.TRADING_WINDOW_UTC ?? '',
+    /** UTC дни: `1-5` (Пн–Пт), пусто = все дни */
+    tradingDaysUtc: process.env.TRADING_DAYS_UTC ?? '',
   },
   /** Виртуальный стартовый баланс для отчёта /stats (бумага) */
   paper: {

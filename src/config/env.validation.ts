@@ -70,9 +70,22 @@ class EnvironmentVariables {
   @Min(0)
   DAILY_MAX_LOSS_USDT!: number;
 
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  MAX_DAILY_SPOT_TRADES?: number;
+
   @IsNumber()
   @Min(0)
   P2P_TAKER_FEE_PERCENT!: number;
+
+  @IsOptional()
+  @IsString()
+  TRADING_WINDOW_UTC?: string;
+
+  @IsOptional()
+  @IsString()
+  TRADING_DAYS_UTC?: string;
 
   @IsOptional()
   @IsString()
@@ -97,6 +110,8 @@ export function validateEnv(config: Record<string, unknown>) {
   if (coerce.MAX_NOTIONAL_USDT == null) coerce.MAX_NOTIONAL_USDT = '500';
   if (coerce.DAILY_MAX_LOSS_USDT == null) coerce.DAILY_MAX_LOSS_USDT = '50';
   if (coerce.P2P_TAKER_FEE_PERCENT == null) coerce.P2P_TAKER_FEE_PERCENT = '0';
+  if (coerce.MAX_DAILY_SPOT_TRADES == null)
+    coerce.MAX_DAILY_SPOT_TRADES = undefined;
   if (coerce.DRY_RUN == null) coerce.DRY_RUN = 'true';
   if (coerce.PORT !== undefined) coerce.PORT = Number(coerce.PORT);
   if (coerce.DRY_RUN !== undefined)
@@ -118,6 +133,8 @@ export function validateEnv(config: Record<string, unknown>) {
   for (const k of numeric) {
     if (coerce[k] !== undefined) coerce[k] = Number(coerce[k]);
   }
+  if (coerce.MAX_DAILY_SPOT_TRADES !== undefined)
+    coerce.MAX_DAILY_SPOT_TRADES = Number(coerce.MAX_DAILY_SPOT_TRADES);
 
   const validated = plainToInstance(EnvironmentVariables, coerce, {
     enableImplicitConversion: true,
