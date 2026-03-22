@@ -132,6 +132,18 @@ export default () => ({
       process.env.PAPER_WALLET_START_USDT ?? '10000',
     ),
   },
+  /**
+   * Опционально: стартовая оценка счёта в валюте котировки пары (USDT и т.д.),
+   * чтобы в /stats показать прибыль/убыток «с начала» (текущая оценка − база).
+   */
+  stats: {
+    equityBaselineQuote: (() => {
+      const v = process.env.STATS_EQUITY_BASELINE_USDT?.trim();
+      if (!v) return null;
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    })(),
+  },
   /** Кэш публичной статистики свечей (market) для Telegram / внутренних проверок */
   marketStats: {
     cacheTtlSec: parseInt(process.env.MARKET_STATS_CACHE_TTL_SEC ?? '120', 10),

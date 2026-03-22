@@ -22,10 +22,7 @@ import { AuditService } from '../audit/audit.service';
 import { OrderIntentService } from './order-intent.service';
 import { RiskService } from '../risk/risk.service';
 import { SpreadService } from '../strategy/spread.service';
-import {
-  formatSpotBalanceShortLines,
-  parseSpotExchangeFill,
-} from './balance-telegram.format';
+import { parseSpotExchangeFill } from './balance-telegram.format';
 
 /** Поля в payload OrderIntent для бумажной статистики */
 export type SimPayload = {
@@ -1160,82 +1157,80 @@ export class SimulationService {
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
     const rtAccumulate =
       this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
-    const spotBaseUrl =
-      this.config.get<string>('binance.spotBaseUrl') ??
-      'https://api.binance.com';
-    const intervalMs =
-      this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
     const fiat = this.config.get<string>('market.fiat') ?? 'USD';
     const asset = this.config.get<string>('market.asset') ?? 'USDT';
+    const equityBaseline =
+      this.config.get<number | null>('stats.equityBaselineQuote') ?? null;
 
     const st = await this.prisma.botState.findUnique({
       where: { id: 'default' },
     });
-    const autoOn = st?.autoTradeEnabled ?? false;
 
-    const isProdApi =
-      spotBaseUrl.replace(/\/$/, '') === 'https://api.binance.com';
-    const netLabel = isProdApi ? 'основная сеть Binance' : 'тестовая сеть';
+    const fmtQ = (n: number, fd = 4) =>
+      n.toLocaleString('ru-RU', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: fd,
+      });
 
-    const lines: string[] = [
-      '📊 Статистика',
-      `Биржа: ${netLabel} (${spotBaseUrl})`,
-      `Пара: ${symbol}`,
-      `Автоторговля: ${autoOn ? 'включена' : 'выключена'}, шаг каждые ${Math.round(intervalMs / 1000)} с`,
-      '',
-    ];
+    const lines: string[] = ['📊 Сводка', ''];
 
     if (dryRun) {
       const dash = await this.getPaperDashboard();
-      lines.push('Режим без реальной биржи (тест в базе).');
+      lines.push('🧪 Бумажный режим (без Spot).');
       lines.push(
-        `Виртуальный кошелёк в отчёте: ${dash.currentPaperWalletUsdt} USDT (старт ${dash.startingPaperWalletUsdt}).`,
+        `💼 Вирт. кошелёк: ${fmtQ(dash.currentPaperWalletUsdt)} USDT (старт ${fmtQ(dash.startingPaperWalletUsdt)})`,
       );
       lines.push(
-        `Сделок в базе (тест): ${dash.totalSimulatedTrades}, сумма «оценок» в расчёте: ${dash.totalEstimatedPnLUsdt} USDT.`,
+        `📋 Тест-сделок в БД: ${dash.totalSimulatedTrades}; сумма оценок: ${fmtQ(dash.totalEstimatedPnLUsdt)} USDT`,
       );
     } else if (!hasKeys) {
-      lines.push('Ключи API не заданы — реальный баланс недоступен.');
+      lines.push('⚠️ Ключи API не заданы — баланс биржи недоступен.');
     } else {
       const bal = await this.binanceSpot.getAccountBalances();
       if (!bal.ok) {
-        lines.push(`Баланс не загрузился: ${bal.error}`);
+        lines.push(`⚠️ Баланс: ${bal.error}`);
       } else {
         const qRow = bal.balances.find((b) => b.asset === quoteAsset);
         const bRow = bal.balances.find((b) => b.asset === baseAsset);
-        lines.push('Сейчас на счёте:');
-        lines.push(
-          ...formatSpotBalanceShortLines(quoteAsset, baseAsset, qRow, bRow),
-        );
+        const uf = qRow ? parseFloat(qRow.free) : 0;
+        const ul = qRow ? parseFloat(qRow.locked) : 0;
+        const bf = bRow ? parseFloat(bRow.free) : 0;
+        const bl = bRow ? parseFloat(bRow.locked) : 0;
+        const quoteTot = uf + ul;
+        const baseTot = bf + bl;
+
+        const tick = await this.binanceSpot.getTickerPrice(symbol);
+        const mark = tick.ok ? tick.price : NaN;
+        const equity =
+          Number.isFinite(mark) && mark > 0
+            ? quoteTot + baseTot * mark
+            : NaN;
+
+        lines.push(`💵 ${quoteAsset}: ${fmtQ(quoteTot)} · ${baseAsset}: ${fmtQ(baseTot, 8)}`);
+        if (Number.isFinite(equity)) {
+          lines.push(
+            `💰 Оценка счёта в ${quoteAsset}: ~${fmtQ(equity)} (котировка + база × марк)`,
+          );
+          if (equityBaseline != null && equityBaseline > 0) {
+            const diff = equity - equityBaseline;
+            const pct = (diff / equityBaseline) * 100;
+            const sign = diff >= 0 ? '📈' : '📉';
+            lines.push(
+              `${sign} К старту (${fmtQ(equityBaseline)} ${quoteAsset}): ${diff >= 0 ? '+' : ''}${fmtQ(diff)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`,
+            );
+          }
+        } else {
+          lines.push('📍 Марк недоступен — полную оценку счёта не посчитать.');
+        }
       }
       lines.push('');
+
+      const tracked =
+        st?.spotTrackedBtc != null ? Number(st.spotTrackedBtc) : 0;
+      const avgE =
+        st?.spotAvgEntryUsdt != null ? Number(st.spotAvgEntryUsdt) : 0;
+
       if (spotStrategy === 'roundtrip') {
-        const tracked =
-          st?.spotTrackedBtc != null ? Number(st.spotTrackedBtc) : 0;
-        const avgE =
-          st?.spotAvgEntryUsdt != null ? Number(st.spotAvgEntryUsdt) : 0;
-        lines.push(
-          'Стратегия: купить → дождаться роста цены → продать учётный объём.',
-        );
-        lines.push(
-          `Продажа в плюс: цена выше средней покупки на ${tpPct}% (одна покупка до ${maxQuote} ${quoteAsset} за раз).`,
-        );
-        if (slPct > 0) {
-          lines.push(
-            `Продажа в минус (стоп): цена ниже средней на ${slPct}% — чтобы не держать бесконечную просадку.`,
-          );
-        }
-        if (maxPosRoundtrip > 0) {
-          lines.push(
-            `Лимит позиции: суммарно не больше ~${maxPosRoundtrip} ${quoteAsset} в учёте (при докупках).`,
-          );
-        }
-        lines.push(
-          `Докупать каждый раз при сигнале: ${rtAccumulate ? 'да' : 'нет'}.`,
-        );
-        lines.push(
-          `У бота в учёте: ${tracked.toFixed(8)} ${baseAsset}, средняя цена покупки ${avgE > 0 ? `~${avgE.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}` : '—'}.`,
-        );
         const emPctRt =
           this.config.get<number>(
             'binance.roundtripEmergencyDrawdownPercent',
@@ -1244,66 +1239,111 @@ export class SimulationService {
           st?.spotRoundtripPeakMarkUsdt != null
             ? Number(st.spotRoundtripPeakMarkUsdt)
             : 0;
-        if (tracked > 0 && peak > 0) {
-          lines.push(
-            `Пик марка с момента входа: ~${peak.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}.`,
-          );
-        }
-        if (emPctRt > 0 && tracked > 0 && peak > 0) {
-          lines.push(
-            `Аварийный выход: марк ниже пика на ${emPctRt}% — принудительная продажа.`,
-          );
-        }
-        const tick = await this.binanceSpot.getTickerPrice(symbol);
-        if (tick.ok && tracked > 0 && avgE > 0) {
-          const m = tick.price;
+
+        const stratBits: string[] = [
+          `тейк +${tpPct}% к средней`,
+          `ордер до ${maxQuote} ${quoteAsset}`,
+        ];
+        if (slPct > 0) stratBits.push(`стоп −${slPct}%`);
+        if (maxPosRoundtrip > 0)
+          stratBits.push(`лимит поз. ~${maxPosRoundtrip} ${quoteAsset}`);
+        if (rtAccumulate) stratBits.push('докупки по сигналу');
+        lines.push(`⚙️ Roundtrip: ${stratBits.join(' · ')}`);
+        lines.push('');
+
+        const tick2 = await this.binanceSpot.getTickerPrice(symbol);
+        if (tick2.ok && tracked > 0 && avgE > 0) {
+          const m = tick2.price;
           const tpTh = avgE * (1 + tpPct / 100);
-          const distTpPct = ((tpTh - m) / m) * 100;
+          const unreal = tracked * (m - avgE);
+          const unrealPct = ((m - avgE) / avgE) * 100;
+          const uEmoji = unreal >= 0 ? '✅' : '🔻';
+          lines.push(`🎯 Позиция в ${baseAsset}`);
           lines.push(
-            `Марк сейчас ~${m.toFixed(2)} ${quoteAsset}; до тейка (>${tpTh.toFixed(2)}) ещё ~${distTpPct > 0 ? distTpPct.toFixed(3) : '0'}% роста от текущей цены.`,
+            `   • В учёте: ${tracked.toFixed(8)} · средняя ${fmtQ(avgE, 2)} ${quoteAsset} за 1 ${baseAsset}`,
+          );
+          lines.push(
+            `   • Марк: ~${fmtQ(m, 2)} ${quoteAsset} · нереализ. ${uEmoji} ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} (${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%)`,
+          );
+          lines.push(
+            `   • План продажи (тейк): выше ${fmtQ(tpTh, 2)} ${quoteAsset}`,
           );
           if (slPct > 0) {
             const slTh = avgE * (1 - slPct / 100);
-            const distSlPct = ((m - slTh) / m) * 100;
             lines.push(
-              `До стопа (<${slTh.toFixed(2)}) запас ~${distSlPct > 0 ? distSlPct.toFixed(3) : '0'}% от текущей цены.`,
+              `   • Стоп: ниже ${fmtQ(slTh, 2)} ${quoteAsset}`,
+            );
+          }
+          if (emPctRt > 0 && peak > 0) {
+            lines.push(
+              `   • Пик марка: ~${fmtQ(peak, 2)} · аварийный выход при −${emPctRt}% от пика`,
+            );
+          }
+          const distTpPct = ((tpTh - m) / m) * 100;
+          if (distTpPct > 0) {
+            lines.push(
+              `   • До тейка: ещё ~${distTpPct.toFixed(2)}% роста от марка`,
+            );
+          }
+        } else if (tracked <= 0) {
+          lines.push(`📭 Открытой учётной позиции нет.`);
+        }
+        lines.push('');
+      } else {
+        lines.push(
+          `⚙️ Стратегия: ${spotSide}, до ${maxQuote} ${quoteAsset} за ордер`,
+        );
+        lines.push('');
+      }
+
+      const lastBuy = await this.getLastExecutedSpotBuy();
+      if (lastBuy) {
+        const t = lastBuy.createdAt
+          .toISOString()
+          .slice(0, 16)
+          .replace('T', ' ');
+        lines.push('🛒 Последняя покупка на бирже');
+        lines.push(
+          `   • ${t} — ${lastBuy.baseQty.toFixed(8)} ${baseAsset} по ~${fmtQ(lastBuy.avgPrice, 2)} ${quoteAsset} (всего ${fmtQ(lastBuy.quoteQty)} ${quoteAsset})`,
+        );
+        if (spotStrategy === 'roundtrip') {
+          const refAvg = avgE > 0 ? avgE : lastBuy.avgPrice;
+          if (refAvg > 0) {
+            const tpTh = refAvg * (1 + tpPct / 100);
+            lines.push(
+              `   • Цель (тейк): > ${fmtQ(tpTh, 2)} ${quoteAsset} за 1 ${baseAsset}`,
             );
           }
         }
-      } else {
-        lines.push(
-          `Стратегия: только ${spotSide}, до ${maxQuote} ${quoteAsset} за ордер.`,
-        );
+        lines.push('');
       }
       lines.push(
-        `Сделки разрешены, если на P2P ${asset}/${fiat} достаточно большой спред (фильтр в настройках).`,
+        `🔗 Сигнал P2P: ${asset}/${fiat} при достаточном спреде`,
       );
       lines.push('');
       const agg = await this.aggregateSpotExecStats();
-      lines.push('Всего по исполненным ордерам на бирже:');
+      lines.push('📑 Исполненные ордера Spot');
       lines.push(
-        `Покупок: ${agg.buyCount}, потрачено ~${agg.buyUsdt.toFixed(4)} ${quoteAsset} (в валюте котировки текущей пары; при смене пары суммы смешиваются).`,
-      );
-      lines.push(
-        `Продаж: ${agg.sellCount}, получено ~${agg.sellUsdt.toFixed(4)} ${quoteAsset}`,
+        `   Покупок: ${agg.buyCount} (~${fmtQ(agg.buyUsdt)} ${quoteAsset}) · Продаж: ${agg.sellCount} (~${fmtQ(agg.sellUsdt)})`,
       );
       if (agg.sellCount > 0) {
+        const p = agg.profitFromSellsUsdt;
         lines.push(
-          `Прибыль с продаж (по учёту бота после продаж): ${agg.profitFromSellsUsdt >= 0 ? '+' : ''}${agg.profitFromSellsUsdt.toFixed(4)} ${quoteAsset}`,
+          `   Реализованный P/L по продажам: ${p >= 0 ? '+' : ''}${fmtQ(p)} ${quoteAsset}`,
         );
       }
     }
 
     lines.push('');
-    lines.push('Последние операции:');
+    lines.push('📜 Последние операции:');
 
     const recent = await this.prisma.orderIntent.findMany({
       orderBy: { createdAt: 'desc' },
-      take: 12,
+      take: 8,
     });
 
     if (recent.length === 0) {
-      lines.push('Пока нет записей.');
+      lines.push('— пока нет записей.');
     } else {
       for (const r of recent) {
         lines.push(this.formatOperationLine(r, baseAsset));
@@ -1311,6 +1351,39 @@ export class SimulationService {
     }
 
     return lines.join('\n');
+  }
+
+  /** Последний исполненный MARKET BUY по Spot (для /stats). */
+  private async getLastExecutedSpotBuy(): Promise<{
+    createdAt: Date;
+    baseQty: number;
+    quoteQty: number;
+    avgPrice: number;
+  } | null> {
+    const rows = await this.prisma.orderIntent.findMany({
+      where: { provider: 'binance_spot', status: 'EXECUTED' },
+      orderBy: { createdAt: 'desc' },
+      take: 48,
+      select: { createdAt: true, payload: true },
+    });
+    for (const r of rows) {
+      const p = r.payload as SpotLivePayload | null;
+      if (p?.spot?.side !== 'BUY' || !p.exchangeResponse) continue;
+      const { baseQty, quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
+      if (
+        !Number.isFinite(baseQty) ||
+        baseQty <= 0 ||
+        !Number.isFinite(quoteQty)
+      )
+        continue;
+      return {
+        createdAt: r.createdAt,
+        baseQty,
+        quoteQty,
+        avgPrice: quoteQty / baseQty,
+      };
+    }
+    return null;
   }
 
   private async aggregateSpotExecStats(): Promise<{
