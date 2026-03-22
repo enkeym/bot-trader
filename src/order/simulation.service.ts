@@ -10,7 +10,7 @@ import {
   applyBuyFill,
   applySellFill,
   computePeakMarkPrice,
-  computeSellQuantity,
+  computeSellQuantityRespectingMinNotional,
   priceHitsEmergencyDrawdown,
   priceHitsStopLoss,
   priceHitsTakeProfit,
@@ -284,7 +284,7 @@ export class SimulationService {
     const spotBaseUrl =
       this.config.get<string>('binance.spotBaseUrl') ??
       'https://api.binance.com';
-    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
+    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
     const side =
       this.config.get<'BUY' | 'SELL'>('binance.spotOrderSide') ?? 'BUY';
     const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
@@ -467,7 +467,7 @@ export class SimulationService {
     const spotBaseUrl =
       this.config.get<string>('binance.spotBaseUrl') ??
       'https://api.binance.com';
-    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
+    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
     const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
     const tpPercent =
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
@@ -606,19 +606,36 @@ export class SimulationService {
         const row = bal.balances.find((b) => b.asset === baseAsset);
         freeBtc = row != null ? parseFloat(row.free) : 0;
       }
-      const { quantity, skipReason } = computeSellQuantity({
-        freeBtc,
-        trackedBtc: tracked,
-        lot: lotRes.lot,
-      });
-      if (quantity <= 0) {
-        await this.audit.log('info', 'roundtrip_skip', {
-          reason: 'sell_qty_unavailable',
-          skipReason,
-          symbol,
+      const { quantity, skipReason, belowMinNotional } =
+        computeSellQuantityRespectingMinNotional({
+          freeBtc,
+          trackedBtc: tracked,
+          lot: lotRes.lot,
+          markPriceUsdt: markPrice,
+          minNotionalUsdt: lotRes.minNotionalUsdt,
         });
-        if (tracked > 0) {
-          await this.persistRoundtripState(tracked, avgEntry, peakMark);
+      if (quantity <= 0) {
+        if (belowMinNotional) {
+          await this.audit.log('warn', 'roundtrip_dust_below_min_notional', {
+            reason:
+              'Учётная позиция меньше min notional Binance; учёт сброшен (актив на Spot не трогаем).',
+            skipReason,
+            tracked,
+            avgEntryUsdt: avgEntry,
+            markPrice,
+            minNotionalUsdt: lotRes.minNotionalUsdt,
+            symbol,
+          });
+          await this.persistRoundtripState(0, 0, 0);
+        } else {
+          await this.audit.log('info', 'roundtrip_skip', {
+            reason: 'sell_qty_unavailable',
+            skipReason,
+            symbol,
+          });
+          if (tracked > 0) {
+            await this.persistRoundtripState(tracked, avgEntry, peakMark);
+          }
         }
         return {
           ev,
@@ -936,6 +953,13 @@ export class SimulationService {
     }
 
     if (!spotResult.ok) {
+      const notionalDustSell =
+        resolvedSide === 'SELL' &&
+        wantSell &&
+        spotResult.code === -1013 &&
+        String(spotResult.error ?? '')
+          .toLowerCase()
+          .includes('notional');
       const failPayload: SpotLivePayload = {
         p2pSpreadContext,
         spot: spotMeta,
@@ -943,11 +967,25 @@ export class SimulationService {
         error: spotResult.error,
         code: spotResult.code,
       };
-      await this.audit.log('error', 'spot_order_failed', {
-        error: spotResult.error,
-        code: spotResult.code,
-        symbol,
-      });
+      if (notionalDustSell) {
+        await this.audit.log('warn', 'roundtrip_dust_exchange_notional', {
+          message:
+            'Binance отклонил SELL (NOTIONAL): сброс учётной позиции; пыль остаётся на Spot.',
+          error: spotResult.error,
+          tracked,
+          symbol,
+        });
+        await this.persistRoundtripState(0, 0, 0);
+      } else {
+        await this.audit.log('error', 'spot_order_failed', {
+          error: spotResult.error,
+          code: spotResult.code,
+          symbol,
+        });
+        if (tracked > 0) {
+          await this.persistRoundtripState(tracked, avgEntry, peakMark);
+        }
+      }
       const failId = createHash('sha256')
         .update(`${spotKey}-fail-${Date.now()}`)
         .digest('hex')
@@ -961,9 +999,6 @@ export class SimulationService {
           payload: failPayload as object,
         },
       });
-      if (tracked > 0) {
-        await this.persistRoundtripState(tracked, avgEntry, peakMark);
-      }
       return {
         ev,
         ok: true,
@@ -1060,8 +1095,8 @@ export class SimulationService {
   async buildTelegramTradingReport(): Promise<string> {
     const dryRun = this.config.get<boolean>('dryRun') ?? true;
     const hasKeys = this.binanceSpot.spotExecutionAllowed();
-    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
-    const baseAsset = symbol.replace(/USDT$|BUSD$|FDUSD$/, '') || 'BTC';
+    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
+    const baseAsset = symbol.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
     const spotStrategy =
       this.config.get<'fixed_side' | 'roundtrip'>('binance.spotStrategy') ??
       'fixed_side';

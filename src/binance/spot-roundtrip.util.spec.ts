@@ -1,5 +1,6 @@
 import {
   computePeakMarkPrice,
+  computeSellQuantityRespectingMinNotional,
   priceHitsEmergencyDrawdown,
   scaleQuoteByVolatility,
 } from './spot-roundtrip.util';
@@ -65,5 +66,31 @@ describe('spot-roundtrip.util emergency & sizing', () => {
         enabled: true,
       }),
     ).toBe(20);
+  });
+
+  it('computeSellQuantityRespectingMinNotional rejects dust', () => {
+    const lot = { minQty: 0.00001, stepSize: 0.00001 };
+    const r = computeSellQuantityRespectingMinNotional({
+      freeBtc: 1,
+      trackedBtc: 0.00001,
+      lot,
+      markPriceUsdt: 70_000,
+      minNotionalUsdt: 5,
+    });
+    expect(r.quantity).toBe(0);
+    expect(r.belowMinNotional).toBe(true);
+  });
+
+  it('computeSellQuantityRespectingMinNotional allows above min notional', () => {
+    const lot = { minQty: 0.00001, stepSize: 0.00001 };
+    const r = computeSellQuantityRespectingMinNotional({
+      freeBtc: 1,
+      trackedBtc: 0.001,
+      lot,
+      markPriceUsdt: 70_000,
+      minNotionalUsdt: 5,
+    });
+    expect(r.quantity).toBe(0.001);
+    expect(r.belowMinNotional).toBeUndefined();
   });
 });

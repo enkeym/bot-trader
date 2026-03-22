@@ -39,6 +39,45 @@ export function computeSellQuantity(params: {
   return { quantity: q };
 }
 
+/**
+ * То же, что computeSellQuantity, плюс фильтр MIN_NOTIONAL / NOTIONAL Binance Spot
+ * (оценка: quantity × markPriceUsdt).
+ */
+export function computeSellQuantityRespectingMinNotional(params: {
+  freeBtc: number;
+  trackedBtc: number;
+  lot: LotSizeFilter;
+  markPriceUsdt: number;
+  minNotionalUsdt: number;
+}): {
+  quantity: number;
+  skipReason?: string;
+  /** Позиция по лоту есть, но сделка на бирже будет отклонена из‑за min notional */
+  belowMinNotional?: boolean;
+} {
+  const base = computeSellQuantity({
+    freeBtc: params.freeBtc,
+    trackedBtc: params.trackedBtc,
+    lot: params.lot,
+  });
+  if (base.quantity <= 0) {
+    return { quantity: 0, skipReason: base.skipReason };
+  }
+  const { markPriceUsdt, minNotionalUsdt } = params;
+  if (!(markPriceUsdt > 0) || !(minNotionalUsdt > 0)) {
+    return { quantity: base.quantity };
+  }
+  const notional = base.quantity * markPriceUsdt;
+  if (notional + 1e-12 < minNotionalUsdt) {
+    return {
+      quantity: 0,
+      skipReason: `notional≈${notional.toFixed(4)} USDT < minNotional=${minNotionalUsdt} USDT (qty=${base.quantity})`,
+      belowMinNotional: true,
+    };
+  }
+  return { quantity: base.quantity };
+}
+
 export function priceHitsTakeProfit(params: {
   markPrice: number;
   avgEntryUsdt: number;

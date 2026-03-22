@@ -52,7 +52,7 @@ export class TradeExportService {
     maxRows: number = DEFAULT_MAX_ROWS,
   ): Promise<TradeExportBundle> {
     const spotSymbol =
-      this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
+      this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
     const spotStrategy =
       this.config.get<'fixed_side' | 'roundtrip'>('binance.spotStrategy') ??
       'fixed_side';

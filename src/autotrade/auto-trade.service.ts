@@ -143,8 +143,8 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     const o = res.order;
     if (!o) return '';
 
-    const spotSym = this.config.get<string>('binance.spotSymbol') ?? 'BTCUSDT';
-    const baseAsset = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'BTC';
+    const spotSym = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
+    const baseAsset = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
 
     if (dryRun && o.status === 'SIMULATED') {
       const p = o.payload as SimPayload | null;

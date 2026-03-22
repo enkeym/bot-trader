@@ -294,12 +294,19 @@ export class BinanceSpotService {
     }
   }
 
-  /** Фильтр LOT_SIZE для символа (публичный exchangeInfo). */
+  /**
+   * LOT_SIZE и min notional для символа (публичный exchangeInfo).
+   * minNotional берётся из фильтра NOTIONAL или MIN_NOTIONAL; если нет — 5 USDT (типичный минимум *USDT).
+   */
   async getLotSizeFilter(
     symbol: string,
-  ): Promise<{ ok: true; lot: LotSizeFilter } | { ok: false; error: string }> {
+  ): Promise<
+    | { ok: true; lot: LotSizeFilter; minNotionalUsdt: number }
+    | { ok: false; error: string }
+  > {
     const base = this.getBaseUrl().replace(/\/$/, '');
     const sym = symbol.trim().toUpperCase();
+    const defaultMinNotional = 5;
     try {
       const res = await axios.get(`${base}/api/v3/exchangeInfo`, {
         params: { symbol: sym },
@@ -317,6 +324,7 @@ export class BinanceSpotService {
             filterType?: string;
             minQty?: string;
             stepSize?: string;
+            minNotional?: string;
           }>;
         }>;
       };
@@ -335,7 +343,22 @@ export class BinanceSpotService {
           error: `LOT_SIZE не найден или невалиден для ${sym}`,
         };
       }
-      return { ok: true, lot: { minQty, stepSize } };
+      const notionalF = s?.filters?.find(
+        (f) =>
+          f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL',
+      );
+      const rawN =
+        notionalF?.minNotional != null
+          ? parseFloat(notionalF.minNotional)
+          : NaN;
+      const minNotionalUsdt =
+        Number.isFinite(rawN) && rawN > 0 ? rawN : defaultMinNotional;
+      if (!(Number.isFinite(rawN) && rawN > 0)) {
+        this.log.debug(
+          `exchangeInfo: minNotional не найден для ${sym}, используем ${defaultMinNotional} USDT`,
+        );
+      }
+      return { ok: true, lot: { minQty, stepSize }, minNotionalUsdt };
     } catch (e) {
       const err = e as AxiosError<{ msg?: string }>;
       return {

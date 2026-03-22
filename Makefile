@@ -8,6 +8,9 @@
 
 COMPOSE := docker compose
 SLEEP_DB := sleep 3
+# Должны совпадать с POSTGRES_* в docker-compose / .env (по умолчанию trader)
+POSTGRES_USER ?= trader
+POSTGRES_DB ?= trader
 
 help:
 	@echo "Trader — команды"
@@ -37,7 +40,7 @@ help:
 	@echo ""
 	@echo "  Прочее:"
 	@echo "    make clean       — удалить dist/"
-	@echo "    make clean-data  — очистить данные: все таблицы приложения в Postgres + FLUSHALL в Redis (нужны DATABASE_URL и запущенный redis из compose)"
+	@echo "    make clean-data  — очистить данные: TRUNCATE в Postgres + FLUSHALL в Redis (docker compose: postgres и redis; без npx). При другом POSTGRES_*: make clean-data POSTGRES_USER=u POSTGRES_DB=d"
 	@echo "    make clean-all   — clean + node_modules/"
 	@echo "    make lint        — eslint"
 	@echo "    make test        — jest"
@@ -109,9 +112,10 @@ clean:
 	@rm -rf dist
 
 # TRUNCATE всех таблиц из prisma/schema.prisma; Redis — весь инстанс (FLUSHALL).
+# Через psql в контейнере postgres — работает без Node/npx на хосте (см. docker-compose.yml).
 clean-data:
 	@echo "Очистка PostgreSQL (таблицы OrderIntent, AuditLog, TelegramUser, BotState)..."
-	@echo 'TRUNCATE TABLE "OrderIntent", "AuditLog", "TelegramUser", "BotState" RESTART IDENTITY CASCADE;' | npx prisma db execute --stdin --schema=prisma/schema.prisma
+	@$(COMPOSE) exec -T postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -v ON_ERROR_STOP=1 -c 'TRUNCATE TABLE "OrderIntent", "AuditLog", "TelegramUser", "BotState" RESTART IDENTITY CASCADE;'
 	@echo "Очистка Redis (docker compose service redis)..."
 	@$(COMPOSE) exec -T redis redis-cli FLUSHALL
 

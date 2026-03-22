@@ -16,7 +16,7 @@ export default () => ({
     apiSecret: process.env.BINANCE_API_SECRET,
     /** База Spot API; по умолчанию продакшен Binance */
     spotBaseUrl: process.env.BINANCE_SPOT_BASE_URL ?? 'https://api.binance.com',
-    spotSymbol: process.env.BINANCE_SPOT_SYMBOL ?? 'BTCUSDT',
+    spotSymbol: process.env.BINANCE_SPOT_SYMBOL ?? 'SOLUSDT',
     spotOrderSide:
       (process.env.BINANCE_SPOT_ORDER_SIDE as 'BUY' | 'SELL') ?? 'BUY',
     /** Потолок quote (USDT) на один MARKET BUY при DRY_RUN=false */
