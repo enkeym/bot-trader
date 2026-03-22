@@ -46,41 +46,102 @@ export class MarketStatsService {
     );
   }
 
+  private spotPublicBaseUrl(): string {
+    return (
+      this.config.get<string>('binance.spotBaseUrl') ??
+      'https://api.binance.com'
+    ).replace(/\/$/, '');
+  }
+
   /**
    * Сводка по 1h свечам: окна 24h / 7d / 30d (последние 720 часов ≈ 30 суток).
+   * Символ: аргумент /market → MARKET_STATS_SYMBOL → BINANCE_SPOT_SYMBOL → SOLUSDT.
+   * На testnet пары вроде USDTRUB часто отсутствуют — задайте MARKET_STATS_SYMBOL=BTCUSDT.
    */
   async getReport(symbol?: string): Promise<MarketStatsReport | null> {
-    const sym = (
-      symbol ??
+    const fromEnv = this.config.get<string>('marketStats.klinesSymbol') ?? '';
+    const preferred =
+      (symbol != null && symbol.trim() !== '' ? symbol.trim() : null) ??
+      (fromEnv !== '' ? fromEnv : null) ??
       this.config.get<string>('binance.spotSymbol') ??
-      'USDTRUB'
-    )
-      .toUpperCase()
-      .replace(/\s+/g, '');
-    const key = `${CACHE_PREFIX}${sym}`;
+      'SOLUSDT';
+    let sym = preferred.toUpperCase().replace(/\s+/g, '');
     const ttl = this.cacheTtlSec();
     const now = Date.now();
 
-    const mem = this.memoryCache.get(key);
-    if (mem && now - mem.at < ttl * 1000) {
-      return mem.report;
-    }
+    const tryCache = (s: string): MarketStatsReport | null => {
+      const k = `${CACHE_PREFIX}${s}`;
+      const mem = this.memoryCache.get(k);
+      if (mem && now - mem.at < ttl * 1000) {
+        return mem.report;
+      }
+      return null;
+    };
+    const tryRedis = async (s: string): Promise<MarketStatsReport | null> => {
+      const k = `${CACHE_PREFIX}${s}`;
+      const rj = await this.redis.getJson<MarketStatsReport>(k);
+      if (rj) {
+        this.memoryCache.set(k, { at: now, report: rj });
+        return rj;
+      }
+      return null;
+    };
 
-    const rj = await this.redis.getJson<MarketStatsReport>(key);
-    if (rj) {
-      this.memoryCache.set(key, { at: now, report: rj });
-      return rj;
-    }
+    let cached = tryCache(sym);
+    if (cached) return cached;
+    const rj0 = await tryRedis(sym);
+    if (rj0) return rj0;
 
-    const res = await this.publicApi.getKlines({
+    const baseUrl = this.spotPublicBaseUrl();
+    let res = await this.publicApi.getKlines({
       symbol: sym,
       interval: '1h',
       limit: 1000,
     });
+    let usedFallback = false;
+    const invalid =
+      !res.ok &&
+      (res.code === -1121 ||
+        String(res.error ?? '')
+          .toLowerCase()
+          .includes('invalid symbol'));
+    if (invalid) {
+      const errFirst = !res.ok ? res.error : '';
+      const fb =
+        this.config.get<string>('marketStats.fallbackKlinesSymbol') ??
+        'BTCUSDT';
+      if (fb && fb.toUpperCase() !== sym) {
+        this.log.warn(
+          `market stats: ${sym} недоступен на ${baseUrl} (${errFirst}) — пробуем ${fb}`,
+        );
+        sym = fb.toUpperCase().replace(/\s+/g, '');
+        usedFallback = true;
+        cached = tryCache(sym);
+        if (cached) return cached;
+        const rjFb = await tryRedis(sym);
+        if (rjFb) return rjFb;
+        res = await this.publicApi.getKlines({
+          symbol: sym,
+          interval: '1h',
+          limit: 1000,
+        });
+      } else {
+        this.log.warn(
+          `market stats: ${sym} @ ${baseUrl}: ${errFirst} (на testnet задайте MARKET_STATS_SYMBOL=BTCUSDT или пару из списка testnet)`,
+        );
+        return null;
+      }
+    }
     if (!res.ok) {
-      this.log.warn(`market stats: ${res.error}`);
+      this.log.warn(`market stats: ${sym} @ ${baseUrl}: ${res.error}`);
       return null;
     }
+
+    const cacheKey = `${CACHE_PREFIX}${sym}`;
+    cached = tryCache(sym);
+    if (cached) return cached;
+    const rjFinal = await tryRedis(sym);
+    if (rjFinal) return rjFinal;
 
     const candles = res.data
       .map(parseBinanceKline)
@@ -92,19 +153,22 @@ export class MarketStatsService {
 
     const windows = buildHourlyWindows(candles);
     const caution = cautionFromStats(windows);
+    const baseDisclaimer =
+      'Справочная аналитика по публичным свечам Binance, не инвестиционная рекомендация.';
     const report: MarketStatsReport = {
       symbol: sym,
       interval: '1h',
       candlesUsed: candles.length,
       windows,
       caution,
-      disclaimer:
-        'Справочная аналитика по публичным свечам Binance, не инвестиционная рекомендация.',
+      disclaimer: usedFallback
+        ? `${baseDisclaimer} Показаны свечи ${sym}: запрошенный символ на ${baseUrl} недоступен (часто на testnet нет USDTRUB и др.).`
+        : baseDisclaimer,
       fetchedAt: new Date().toISOString(),
     };
 
-    await this.redis.setJson(key, report, ttl);
-    this.memoryCache.set(key, { at: now, report });
+    await this.redis.setJson(cacheKey, report, ttl);
+    this.memoryCache.set(cacheKey, { at: now, report });
 
     return report;
   }

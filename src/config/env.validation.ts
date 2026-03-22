@@ -104,7 +104,7 @@ export function validateEnv(config: Record<string, unknown>) {
   const coerce: Record<string, unknown> = { ...config };
   if (coerce.EXECUTION_MODE == null)
     coerce.EXECUTION_MODE = ExecutionMode.AUTO_EXCHANGE_ONLY;
-  if (coerce.FIAT == null) coerce.FIAT = 'RUB';
+  if (coerce.FIAT == null) coerce.FIAT = 'USD';
   if (coerce.ASSET == null) coerce.ASSET = 'USDT';
   if (coerce.MIN_SPREAD_PERCENT == null) coerce.MIN_SPREAD_PERCENT = '0.15';
   if (coerce.MAX_NOTIONAL_USDT == null) coerce.MAX_NOTIONAL_USDT = '500';

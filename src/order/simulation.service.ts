@@ -165,7 +165,7 @@ export class SimulationService {
 
   async runPairSimulation(notionalUsdt: number) {
     const asset = this.config.get<string>('market.asset') ?? 'USDT';
-    const fiat = this.config.get<string>('market.fiat') ?? 'RUB';
+    const fiat = this.config.get<string>('market.fiat') ?? 'USD';
     const dryRun = this.config.get<boolean>('dryRun') ?? true;
 
     const ev = await this.spread.evaluate(asset, fiat);
@@ -1165,7 +1165,7 @@ export class SimulationService {
       'https://api.binance.com';
     const intervalMs =
       this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
-    const fiat = this.config.get<string>('market.fiat') ?? 'RUB';
+    const fiat = this.config.get<string>('market.fiat') ?? 'USD';
     const asset = this.config.get<string>('market.asset') ?? 'USDT';
 
     const st = await this.prisma.botState.findUnique({

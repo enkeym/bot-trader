@@ -31,7 +31,7 @@ export class SpreadMonitorService {
     if (!chatId) return;
 
     const asset = this.config.get<string>('market.asset') ?? 'USDT';
-    const fiat = this.config.get<string>('market.fiat') ?? 'RUB';
+    const fiat = this.config.get<string>('market.fiat') ?? 'USD';
     const min = this.config.get<number>('strategy.minSpreadPercent') ?? 0.15;
     const ev = await this.spread.evaluate(asset, fiat);
     const net = ev.netSpreadPercent;

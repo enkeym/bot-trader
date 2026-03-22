@@ -101,7 +101,8 @@ export default () => ({
     ExecutionMode.AUTO_EXCHANGE_ONLY,
   p2pProvider: (process.env.P2P_PROVIDER ?? 'binance').trim(),
   market: {
-    fiat: (process.env.FIAT ?? 'RUB').trim(),
+    /** P2P-стакан: USD/EUR обычно открыты с VPS; RUB часто пустой вне РФ */
+    fiat: (process.env.FIAT ?? 'USD').trim(),
     asset: (process.env.ASSET ?? 'USDT').trim(),
   },
   strategy: {
@@ -134,5 +135,14 @@ export default () => ({
   /** Кэш публичной статистики свечей (market) для Telegram / внутренних проверок */
   marketStats: {
     cacheTtlSec: parseInt(process.env.MARKET_STATS_CACHE_TTL_SEC ?? '120', 10),
+    /**
+     * Символ для /api/v3/klines (если пусто — как BINANCE_SPOT_SYMBOL).
+     * На testnet многих пар нет: задайте BTCUSDT или SOLUSDT, даже если Spot-торговля по другой паре.
+     */
+    klinesSymbol: (process.env.MARKET_STATS_SYMBOL ?? '').trim(),
+    /** Если основной символ даёт Invalid symbol — одна попытка с этим (по умолчанию BTCUSDT). */
+    fallbackKlinesSymbol: (
+      process.env.MARKET_STATS_FALLBACK_SYMBOL ?? 'BTCUSDT'
+    ).trim(),
   },
 });
