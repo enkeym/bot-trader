@@ -53,7 +53,7 @@ export class MarketStatsService {
     const sym = (
       symbol ??
       this.config.get<string>('binance.spotSymbol') ??
-      'SOLUSDT'
+      'USDTRUB'
     )
       .toUpperCase()
       .replace(/\s+/g, '');

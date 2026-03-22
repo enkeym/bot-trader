@@ -47,8 +47,9 @@ export function computeSellQuantityRespectingMinNotional(params: {
   freeBtc: number;
   trackedBtc: number;
   lot: LotSizeFilter;
-  markPriceUsdt: number;
-  minNotionalUsdt: number;
+  /** Цена в валюте котировки за 1 единицу базы (USDT/SOL, RUB/USDT, …). */
+  markPriceQuote: number;
+  minNotionalQuote: number;
 }): {
   quantity: number;
   skipReason?: string;
@@ -63,15 +64,15 @@ export function computeSellQuantityRespectingMinNotional(params: {
   if (base.quantity <= 0) {
     return { quantity: 0, skipReason: base.skipReason };
   }
-  const { markPriceUsdt, minNotionalUsdt } = params;
-  if (!(markPriceUsdt > 0) || !(minNotionalUsdt > 0)) {
+  const { markPriceQuote, minNotionalQuote } = params;
+  if (!(markPriceQuote > 0) || !(minNotionalQuote > 0)) {
     return { quantity: base.quantity };
   }
-  const notional = base.quantity * markPriceUsdt;
-  if (notional + 1e-12 < minNotionalUsdt) {
+  const notional = base.quantity * markPriceQuote;
+  if (notional + 1e-12 < minNotionalQuote) {
     return {
       quantity: 0,
-      skipReason: `notional≈${notional.toFixed(4)} USDT < minNotional=${minNotionalUsdt} USDT (qty=${base.quantity})`,
+      skipReason: `notional≈${notional.toFixed(4)} < minNotional=${minNotionalQuote} (qty=${base.quantity})`,
       belowMinNotional: true,
     };
   }

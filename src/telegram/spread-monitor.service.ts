@@ -24,6 +24,9 @@ export class SpreadMonitorService {
 
   @Cron(CronExpression.EVERY_5_MINUTES)
   async checkSpread() {
+    if (!this.config.get<boolean>('telegramSpreadAlertsEnabled')) {
+      return;
+    }
     const chatId = this.config.get<string>('telegramAlertChatId');
     if (!chatId) return;
 

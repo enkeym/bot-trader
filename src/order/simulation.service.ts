@@ -63,6 +63,8 @@ export type SpotLivePayload = {
     side: 'BUY' | 'SELL';
     quoteOrderQty?: number;
     quantity?: number;
+    baseAsset?: string;
+    quoteAsset?: string;
   };
   exchangeResponse?: Record<string, unknown>;
   /** Оценка «сигнала» по P2P-спреду на объёме notional (не реализованный PnL Spot). */
@@ -287,8 +289,29 @@ export class SimulationService {
     const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
     const side =
       this.config.get<'BUY' | 'SELL'>('binance.spotOrderSide') ?? 'BUY';
-    const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
+    const maxQuoteUsdt =
+      this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
+    const maxQuoteRub =
+      this.config.get<number>('binance.spotMaxQuoteRub') ?? 50_000;
     const spotQty = this.config.get<number>('binance.spotQuantity') ?? 0;
+
+    const pairFil = await this.binanceSpot.getLotSizeFilter(symbol);
+    if (!pairFil.ok) {
+      await this.audit.log('error', 'spot_order_failed', {
+        error: pairFil.error,
+        symbol,
+      });
+      return {
+        ev,
+        ok: true,
+        dryRun: false,
+        executionMode,
+        order: null,
+        estimatedProfitUsdt,
+        orderCreated: false,
+      };
+    }
+    const maxQuote = pairFil.quoteAsset === 'RUB' ? maxQuoteRub : maxQuoteUsdt;
 
     const p2pSpreadContext = {
       grossSpreadPercent: gross,
@@ -302,6 +325,8 @@ export class SimulationService {
       baseUrl: spotBaseUrl,
       symbol,
       side,
+      baseAsset: pairFil.baseAsset,
+      quoteAsset: pairFil.quoteAsset,
       ...(side === 'BUY'
         ? { quoteOrderQty: Math.min(notionalUsdt, maxQuote) }
         : { quantity: spotQty }),
@@ -410,8 +435,8 @@ export class SimulationService {
     executedQty: number;
     cumQuote: number;
   } {
-    const { baseQty, usdt } = parseSpotExchangeFill(data);
-    return { executedQty: baseQty, cumQuote: usdt };
+    const { baseQty, quoteQty } = parseSpotExchangeFill(data);
+    return { executedQty: baseQty, cumQuote: quoteQty };
   }
 
   private async persistRoundtripState(
@@ -468,16 +493,20 @@ export class SimulationService {
       this.config.get<string>('binance.spotBaseUrl') ??
       'https://api.binance.com';
     const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
-    const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
+    const maxQuoteUsdt =
+      this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
+    const maxQuoteRub =
+      this.config.get<number>('binance.spotMaxQuoteRub') ?? 50_000;
     const tpPercent =
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
     const slPercent =
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
     const maxPosUsdt =
       this.config.get<number>('binance.roundtripMaxPositionUsdt') ?? 0;
+    const maxPosRub =
+      this.config.get<number>('binance.roundtripMaxPositionRub') ?? 0;
     const accumulateOnSignal =
       this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
-    const baseAsset = symbol.replace(/USDT$|BUSD$|FDUSD$/, '');
 
     const p2pSpreadContext = {
       grossSpreadPercent: gross,
@@ -505,6 +534,28 @@ export class SimulationService {
       };
     }
     const markPrice = tick.price;
+
+    const symFil = await this.binanceSpot.getLotSizeFilter(symbol);
+    if (!symFil.ok) {
+      await this.audit.log('warn', 'roundtrip_skip', {
+        reason: 'lot_filter_failed',
+        error: symFil.error,
+        symbol,
+      });
+      return {
+        ev,
+        ok: true,
+        dryRun,
+        executionMode,
+        order: null,
+        estimatedProfitUsdt,
+        orderCreated: false,
+      };
+    }
+    const baseAsset = symFil.baseAsset;
+    const quoteAsset = symFil.quoteAsset;
+    const maxQuote = quoteAsset === 'RUB' ? maxQuoteRub : maxQuoteUsdt;
+    const maxPosQuote = quoteAsset === 'RUB' ? maxPosRub : maxPosUsdt;
 
     const st = await this.prisma.botState.findUnique({
       where: { id: 'default' },
@@ -562,26 +613,6 @@ export class SimulationService {
     let sellQty: number | undefined;
 
     if (wantSell) {
-      const lotRes = await this.binanceSpot.getLotSizeFilter(symbol);
-      if (!lotRes.ok) {
-        await this.audit.log('warn', 'roundtrip_skip', {
-          reason: 'lot_filter_failed',
-          error: lotRes.error,
-          symbol,
-        });
-        if (tracked > 0) {
-          await this.persistRoundtripState(tracked, avgEntry, peakMark);
-        }
-        return {
-          ev,
-          ok: true,
-          dryRun,
-          executionMode,
-          order: null,
-          estimatedProfitUsdt,
-          orderCreated: false,
-        };
-      }
       let freeBtc = tracked;
       if (!dryRun) {
         const bal = await this.binanceSpot.getAccountBalances();
@@ -610,9 +641,9 @@ export class SimulationService {
         computeSellQuantityRespectingMinNotional({
           freeBtc,
           trackedBtc: tracked,
-          lot: lotRes.lot,
-          markPriceUsdt: markPrice,
-          minNotionalUsdt: lotRes.minNotionalUsdt,
+          lot: symFil.lot,
+          markPriceQuote: markPrice,
+          minNotionalQuote: symFil.minNotionalQuote,
         });
       if (quantity <= 0) {
         if (belowMinNotional) {
@@ -623,7 +654,8 @@ export class SimulationService {
             tracked,
             avgEntryUsdt: avgEntry,
             markPrice,
-            minNotionalUsdt: lotRes.minNotionalUsdt,
+            minNotionalQuote: symFil.minNotionalQuote,
+            quoteAsset,
             symbol,
           });
           await this.persistRoundtripState(0, 0, 0);
@@ -748,13 +780,14 @@ export class SimulationService {
         });
       }
       quoteOrderQty = q;
-      if (maxPosUsdt > 0) {
+      if (maxPosQuote > 0) {
         const posVal = tracked * avgEntry;
-        if (posVal + (quoteOrderQty ?? 0) > maxPosUsdt) {
+        if (posVal + (quoteOrderQty ?? 0) > maxPosQuote) {
           await this.audit.log('info', 'roundtrip_skip', {
-            reason: 'max_position_usdt',
-            maxPosUsdt,
-            positionValueUsdt: posVal,
+            reason: 'max_position_quote',
+            maxPosQuote,
+            quoteAsset,
+            positionValueQuote: posVal,
             quoteOrderQty,
             tracked,
             avgEntryUsdt: avgEntry,
@@ -794,13 +827,14 @@ export class SimulationService {
             orderCreated: false,
           };
         }
-        const usdtRow = balU.balances.find((b) => b.asset === 'USDT');
-        const freeUsdt = usdtRow != null ? parseFloat(usdtRow.free) : 0;
-        if (freeUsdt < (quoteOrderQty ?? 0)) {
+        const quoteRow = balU.balances.find((b) => b.asset === quoteAsset);
+        const freeQuote = quoteRow != null ? parseFloat(quoteRow.free) : 0;
+        if (freeQuote < (quoteOrderQty ?? 0)) {
           await this.audit.log('warn', 'roundtrip_skip', {
-            reason: 'insufficient_usdt',
-            freeUsdt,
-            needUsdt: quoteOrderQty,
+            reason: 'insufficient_quote',
+            quoteAsset,
+            freeQuote,
+            needQuote: quoteOrderQty,
             symbol,
           });
           if (tracked > 0) {
@@ -825,6 +859,8 @@ export class SimulationService {
       baseUrl: spotBaseUrl,
       symbol,
       side: resolvedSide,
+      baseAsset,
+      quoteAsset,
       ...(resolvedSide === 'BUY'
         ? { quoteOrderQty: quoteOrderQty as number }
         : { quantity: sellQty as number }),
@@ -1096,7 +1132,23 @@ export class SimulationService {
     const dryRun = this.config.get<boolean>('dryRun') ?? true;
     const hasKeys = this.binanceSpot.spotExecutionAllowed();
     const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
-    const baseAsset = symbol.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
+    const pairFil = await this.binanceSpot.getLotSizeFilter(symbol);
+    const baseAsset = pairFil.ok
+      ? pairFil.baseAsset
+      : symbol.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
+    const quoteAsset = pairFil.ok ? pairFil.quoteAsset : 'USDT';
+    const maxQuoteUsdt =
+      this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
+    const maxQuoteRub =
+      this.config.get<number>('binance.spotMaxQuoteRub') ?? 50_000;
+    const maxQuote =
+      quoteAsset === 'RUB' ? maxQuoteRub : maxQuoteUsdt;
+    const maxPosUsdt =
+      this.config.get<number>('binance.roundtripMaxPositionUsdt') ?? 0;
+    const maxPosRub =
+      this.config.get<number>('binance.roundtripMaxPositionRub') ?? 0;
+    const maxPosRoundtrip =
+      quoteAsset === 'RUB' ? maxPosRub : maxPosUsdt;
     const spotStrategy =
       this.config.get<'fixed_side' | 'roundtrip'>('binance.spotStrategy') ??
       'fixed_side';
@@ -1106,11 +1158,8 @@ export class SimulationService {
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
     const slPct =
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
-    const maxPosRoundtrip =
-      this.config.get<number>('binance.roundtripMaxPositionUsdt') ?? 0;
     const rtAccumulate =
       this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
-    const maxQuote = this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
     const spotBaseUrl =
       this.config.get<string>('binance.spotBaseUrl') ??
       'https://api.binance.com';
@@ -1152,10 +1201,12 @@ export class SimulationService {
       if (!bal.ok) {
         lines.push(`Баланс не загрузился: ${bal.error}`);
       } else {
-        const u = bal.balances.find((b) => b.asset === 'USDT');
-        const bBase = bal.balances.find((b) => b.asset === baseAsset);
+        const qRow = bal.balances.find((b) => b.asset === quoteAsset);
+        const bRow = bal.balances.find((b) => b.asset === baseAsset);
         lines.push('Сейчас на счёте:');
-        lines.push(...formatSpotBalanceShortLines(baseAsset, u, bBase));
+        lines.push(
+          ...formatSpotBalanceShortLines(quoteAsset, baseAsset, qRow, bRow),
+        );
       }
       lines.push('');
       if (spotStrategy === 'roundtrip') {
@@ -1167,7 +1218,7 @@ export class SimulationService {
           'Стратегия: купить → дождаться роста цены → продать учётный объём.',
         );
         lines.push(
-          `Продажа в плюс: цена выше средней покупки на ${tpPct}% (одна покупка до ${maxQuote} USDT за раз).`,
+          `Продажа в плюс: цена выше средней покупки на ${tpPct}% (одна покупка до ${maxQuote} ${quoteAsset} за раз).`,
         );
         if (slPct > 0) {
           lines.push(
@@ -1176,14 +1227,14 @@ export class SimulationService {
         }
         if (maxPosRoundtrip > 0) {
           lines.push(
-            `Лимит позиции: суммарно не больше ~${maxPosRoundtrip} USDT в учёте (при докупках).`,
+            `Лимит позиции: суммарно не больше ~${maxPosRoundtrip} ${quoteAsset} в учёте (при докупках).`,
           );
         }
         lines.push(
           `Докупать каждый раз при сигнале: ${rtAccumulate ? 'да' : 'нет'}.`,
         );
         lines.push(
-          `У бота в учёте: ${tracked.toFixed(8)} ${baseAsset}, средняя цена покупки ${avgE > 0 ? `~${avgE.toFixed(2)} USDT за 1 ${baseAsset}` : '—'}.`,
+          `У бота в учёте: ${tracked.toFixed(8)} ${baseAsset}, средняя цена покупки ${avgE > 0 ? `~${avgE.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}` : '—'}.`,
         );
         const emPctRt =
           this.config.get<number>(
@@ -1195,7 +1246,7 @@ export class SimulationService {
             : 0;
         if (tracked > 0 && peak > 0) {
           lines.push(
-            `Пик марка с момента входа: ~${peak.toFixed(2)} USDT за 1 ${baseAsset}.`,
+            `Пик марка с момента входа: ~${peak.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}.`,
           );
         }
         if (emPctRt > 0 && tracked > 0 && peak > 0) {
@@ -1209,7 +1260,7 @@ export class SimulationService {
           const tpTh = avgE * (1 + tpPct / 100);
           const distTpPct = ((tpTh - m) / m) * 100;
           lines.push(
-            `Марк сейчас ~${m.toFixed(2)} USDT; до тейка (>${tpTh.toFixed(2)}) ещё ~${distTpPct > 0 ? distTpPct.toFixed(3) : '0'}% роста от текущей цены.`,
+            `Марк сейчас ~${m.toFixed(2)} ${quoteAsset}; до тейка (>${tpTh.toFixed(2)}) ещё ~${distTpPct > 0 ? distTpPct.toFixed(3) : '0'}% роста от текущей цены.`,
           );
           if (slPct > 0) {
             const slTh = avgE * (1 - slPct / 100);
@@ -1221,7 +1272,7 @@ export class SimulationService {
         }
       } else {
         lines.push(
-          `Стратегия: только ${spotSide}, до ${maxQuote} USDT за ордер.`,
+          `Стратегия: только ${spotSide}, до ${maxQuote} ${quoteAsset} за ордер.`,
         );
       }
       lines.push(
@@ -1231,14 +1282,14 @@ export class SimulationService {
       const agg = await this.aggregateSpotExecStats();
       lines.push('Всего по исполненным ордерам на бирже:');
       lines.push(
-        `Покупок: ${agg.buyCount}, потрачено ~${agg.buyUsdt.toFixed(4)} USDT`,
+        `Покупок: ${agg.buyCount}, потрачено ~${agg.buyUsdt.toFixed(4)} ${quoteAsset} (в валюте котировки текущей пары; при смене пары суммы смешиваются).`,
       );
       lines.push(
-        `Продаж: ${agg.sellCount}, получено ~${agg.sellUsdt.toFixed(4)} USDT`,
+        `Продаж: ${agg.sellCount}, получено ~${agg.sellUsdt.toFixed(4)} ${quoteAsset}`,
       );
       if (agg.sellCount > 0) {
         lines.push(
-          `Прибыль с продаж (по учёту бота после продаж): ${agg.profitFromSellsUsdt >= 0 ? '+' : ''}${agg.profitFromSellsUsdt.toFixed(4)} USDT`,
+          `Прибыль с продаж (по учёту бота после продаж): ${agg.profitFromSellsUsdt >= 0 ? '+' : ''}${agg.profitFromSellsUsdt.toFixed(4)} ${quoteAsset}`,
         );
       }
     }
@@ -1281,14 +1332,14 @@ export class SimulationService {
     for (const r of rows) {
       const p = r.payload as SpotLivePayload | null;
       if (!p?.spot?.side || !p.exchangeResponse) continue;
-      const { usdt } = parseSpotExchangeFill(p.exchangeResponse);
-      if (!Number.isFinite(usdt)) continue;
+      const { quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
+      if (!Number.isFinite(quoteQty)) continue;
       if (p.spot.side === 'BUY') {
         buyCount++;
-        buyUsdt += usdt;
+        buyUsdt += quoteQty;
       } else if (p.spot.side === 'SELL') {
         sellCount++;
-        sellUsdt += usdt;
+        sellUsdt += quoteQty;
         const rp = p.roundtrip?.realizedPnlUsdtEstimate;
         if (rp != null && Number.isFinite(rp)) profitFromSellsUsdt += rp;
       }
@@ -1318,7 +1369,7 @@ export class SimulationService {
       const rt = p?.roundtrip;
       if (rt) {
         const sideRu = rt.chosenSide === 'BUY' ? 'купил бы' : 'продал бы';
-        return `• ${t} | Тест (без биржи): ${sideRu} по ~${rt.markPrice.toFixed(2)} USDT за 1 ${baseAsset}, в учёте после шага ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`;
+        return `• ${t} | Тест (без биржи): ${sideRu} по ~${rt.markPrice.toFixed(2)} (котировка/база) за 1 ${baseAsset}, в учёте после шага ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`;
       }
       return `• ${t} | Тест (без биржи): сигнал, в расчёте ~${p?.notionalUsdt ?? '—'} USDT`;
     }
@@ -1328,13 +1379,14 @@ export class SimulationService {
         return `• ${t} | Ошибка: ${p?.error ?? r.status}`;
       }
       const ex = p?.exchangeResponse;
-      const { baseQty, usdt } = parseSpotExchangeFill(ex);
+      const { baseQty, quoteQty } = parseSpotExchangeFill(ex);
+      const qa = p?.spot?.quoteAsset ?? 'USDT';
       const sd = p?.spot?.side;
       const rtp = p?.roundtrip?.realizedPnlUsdtEstimate;
-      if (sd === 'BUY' && Number.isFinite(usdt) && Number.isFinite(baseQty)) {
-        return `• ${t} | Купил ${baseQty.toFixed(8)} ${baseAsset} за ${usdt.toFixed(4)} USDT`;
+      if (sd === 'BUY' && Number.isFinite(quoteQty) && Number.isFinite(baseQty)) {
+        return `• ${t} | Купил ${baseQty.toFixed(8)} ${baseAsset} за ${quoteQty.toFixed(4)} ${qa}`;
       }
-      if (sd === 'SELL' && Number.isFinite(usdt) && Number.isFinite(baseQty)) {
+      if (sd === 'SELL' && Number.isFinite(quoteQty) && Number.isFinite(baseQty)) {
         const ek = p?.roundtrip?.exitKind;
         const tag =
           ek === 'stop_loss'
@@ -1346,11 +1398,11 @@ export class SimulationService {
                 : '';
         let tail = '';
         if (rtp != null && Number.isFinite(rtp)) {
-          const cost = usdt - rtp;
+          const cost = quoteQty - rtp;
           const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
-          tail = `; прибыль ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} USDT (~${pct}% к себестоимости)`;
+          tail = `; прибыль ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa} (~${pct}% к себестоимости)`;
         }
-        return `• ${t} | Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT${tag}${tail}`;
+        return `• ${t} | Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${quoteQty.toFixed(4)} ${qa}${tag}${tail}`;
       }
       return `• ${t} | ${sd ?? '?'} ${p?.spot?.symbol ?? ''} (детали не распарсились)`;
     }

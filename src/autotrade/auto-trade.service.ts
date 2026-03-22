@@ -144,82 +144,149 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     if (!o) return '';
 
     const spotSym = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
-    const baseAsset = spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
+    const pairFil = await this.binanceSpot.getLotSizeFilter(spotSym);
+    const baseAsset = pairFil.ok
+      ? pairFil.baseAsset
+      : spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
+    const quoteAsset = pairFil.ok ? pairFil.quoteAsset : 'USDT';
 
     if (dryRun && o.status === 'SIMULATED') {
       const p = o.payload as SimPayload | null;
       const rt = p?.roundtrip;
       if (rt) {
-        const verb = rt.chosenSide === 'BUY' ? 'Купил бы' : 'Продал бы';
-        return [
-          '🧪 Тест (деньги на бирже не трогаются)',
-          `Пара: ${spotSym}`,
-          `${verb} по цене ~${rt.markPrice.toFixed(2)} USDT за 1 ${baseAsset}`,
-          `После шага в учёте бота: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}, средняя входа ~${rt.avgEntryUsdtAfter.toFixed(2)} USDT/${baseAsset}`,
-        ].join('\n');
+        const exitPaper =
+          rt.chosenSide === 'SELL'
+            ? rt.exitKind === 'stop_loss'
+              ? ' · 🛡 стоп'
+              : rt.exitKind === 'emergency_drawdown'
+                ? ' · ⚡ аварийный выход'
+                : rt.exitKind === 'take_profit'
+                  ? ' · 🎯 тейк'
+                  : ''
+            : '';
+        const lines =
+          rt.chosenSide === 'BUY'
+            ? [
+                '🟢 ПОКУПКА',
+                `📊 Пара: ${spotSym}`,
+                '',
+                `💱 Курс в шаге: ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
+                `🪙 В учёте после шага: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`,
+                `📈 Средняя цена входа: ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset} / ${baseAsset}`,
+              ]
+            : [
+                '🔴 ПРОДАЖА',
+                `📊 Пара: ${spotSym}${exitPaper}`,
+                '',
+                `💱 Курс в шаге: ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
+                `🪙 В учёте после шага: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`,
+                `📈 Средняя цена входа: ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset} / ${baseAsset}`,
+              ];
+        return [...lines, '', '📋 Запись в журнале · Spot не вызывался'].join(
+          '\n',
+        );
       }
       return [
-        '🧪 Тест (без реальной сделки)',
-        `Пара: ${spotSym}`,
-        `Сумма в расчёте: ~${p?.notionalUsdt ?? '—'} USDT`,
+        '📊 Сигнал стратегии',
+        `🔗 Пара: ${spotSym}`,
+        `💵 Объём в расчёте: ~${p?.notionalUsdt ?? '—'} (USDT в сигнале P2P)`,
+        '',
+        '📋 Запись в журнале · Spot не вызывался',
       ].join('\n');
     }
 
     const pl = o.payload as SpotLivePayload | null;
     if (o.status === 'FAILED') {
       return [
-        '❌ Сделка не прошла',
-        `Пара: ${pl?.spot?.symbol ?? spotSym}`,
-        pl?.error ?? 'ошибка',
+        '⚠️ Ордер не исполнен',
+        `📊 Пара: ${pl?.spot?.symbol ?? spotSym}`,
+        `❗ ${pl?.error ?? 'ошибка'}`,
       ].join('\n');
     }
 
     const ex = pl?.exchangeResponse ?? {};
-    const { baseQty, usdt } = parseSpotExchangeFill(ex);
+    const { baseQty, quoteQty } = parseSpotExchangeFill(ex);
     const side = pl?.spot?.side;
     const rtp = pl?.roundtrip?.realizedPnlUsdtEstimate;
     const exitKind = pl?.roundtrip?.exitKind;
 
-    const head = ['✅ Сделка на бирже', `Пара: ${pl?.spot?.symbol ?? spotSym}`];
+    const sym = pl?.spot?.symbol ?? spotSym;
+    const qa = pl?.spot?.quoteAsset ?? quoteAsset;
+    const ba = pl?.spot?.baseAsset ?? baseAsset;
+    const exitLabel =
+      exitKind === 'stop_loss'
+        ? '🛡 стоп-лосс'
+        : exitKind === 'emergency_drawdown'
+          ? '⚡ аварийный выход'
+          : exitKind === 'take_profit'
+            ? '🎯 тейк-профит'
+            : null;
 
-    if (side === 'BUY' && Number.isFinite(baseQty) && Number.isFinite(usdt)) {
+    const head: string[] = [];
+
+    if (
+      side === 'BUY' &&
+      Number.isFinite(baseQty) &&
+      Number.isFinite(quoteQty)
+    ) {
+      const bq = Number(baseQty);
+      const qq = Number(quoteQty);
       head.push(
-        `Купил ${baseQty.toFixed(8)} ${baseAsset} за ${usdt.toFixed(4)} USDT`,
+        '🟢 ПОКУПКА',
+        `📊 Пара: ${sym}`,
+        '',
+        `💵 Списано: ${qq.toFixed(4)} ${qa}`,
+        `🪙 Зачислено: ${bq.toFixed(8)} ${ba}`,
       );
     } else if (
       side === 'SELL' &&
       Number.isFinite(baseQty) &&
-      Number.isFinite(usdt)
+      Number.isFinite(quoteQty)
     ) {
-      const reason =
-        exitKind === 'stop_loss'
-          ? ' (стоп-лосс — цена ниже средней покупки)'
-          : exitKind === 'emergency_drawdown'
-            ? ' (аварийный выход — просадка от пика марка)'
-            : exitKind === 'take_profit'
-              ? ' (тейк-профит)'
-              : '';
-      let line = `Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${usdt.toFixed(4)} USDT${reason}`;
+      const bq = Number(baseQty);
+      const qq = Number(quoteQty);
+      head.push(
+        '🔴 ПРОДАЖА',
+        `📊 Пара: ${sym}` + (exitLabel != null ? ` · ${exitLabel}` : ''),
+        '',
+        `📤 Списано: ${bq.toFixed(8)} ${ba}`,
+        `💵 Зачислено: ${qq.toFixed(4)} ${qa}`,
+      );
       if (rtp != null && Number.isFinite(rtp)) {
-        const cost = usdt - rtp;
+        const cost = qq - rtp;
         const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
-        line += `\nПрибыль с этой продажи: ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} USDT (~${pct}% к себестоимости)`;
+        head.push(
+          '',
+          '📒 Эта партия в учёте:',
+          `   🧾 Себестоимость: ${cost.toFixed(4)} ${qa} (по средней входа)`,
+          `   💰 Выручка: ${qq.toFixed(4)} ${qa}`,
+          `   ${rtp >= 0 ? '📈' : '📉'} Результат: ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa}`,
+        );
+        if (pct !== '—') {
+          head.push(`   📊 ~${pct}% к себестоимости (не от всего депозита)`);
+        }
       }
-      head.push(line);
     } else {
-      head.push(`Сторона: ${side ?? '—'}, объём по ответу биржи не распознан`);
+      head.push(
+        '✅ Исполнено на бирже',
+        `📊 Пара: ${sym}`,
+        `ℹ️ ${side ?? '—'} — объём в ответе не распознан`,
+      );
     }
 
     const bal = await this.binanceSpot.getAccountBalances();
     if (bal.ok) {
-      const u = bal.balances.find((b) => b.asset === 'USDT');
-      const b = bal.balances.find((x) => x.asset === baseAsset);
+      const qRow = bal.balances.find((b) => b.asset === qa);
+      const bRow = bal.balances.find((x) => x.asset === ba);
       head.push('');
-      head.push('Сейчас на счёте:');
-      head.push(...formatSpotBalanceShortLines(baseAsset, u, b));
+      head.push('🏦 Счёт Spot сейчас');
+      const balLines = formatSpotBalanceShortLines(qa, ba, qRow, bRow);
+      for (const line of balLines) {
+        head.push(line.startsWith(`${qa}:`) ? `💵 ${line}` : `🪙 ${line}`);
+      }
     } else {
       head.push('');
-      head.push(`Баланс не подтянут: ${bal.error}`);
+      head.push(`⚠️ Баланс: ${bal.error}`);
     }
 
     return head.join('\n');

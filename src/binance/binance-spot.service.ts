@@ -296,12 +296,16 @@ export class BinanceSpotService {
 
   /**
    * LOT_SIZE и min notional для символа (публичный exchangeInfo).
-   * minNotional берётся из фильтра NOTIONAL или MIN_NOTIONAL; если нет — 5 USDT (типичный минимум *USDT).
+   * minNotionalQuote — в валюте котировки (USDT, RUB, …).
    */
-  async getLotSizeFilter(
-    symbol: string,
-  ): Promise<
-    | { ok: true; lot: LotSizeFilter; minNotionalUsdt: number }
+  async getLotSizeFilter(symbol: string): Promise<
+    | {
+        ok: true;
+        lot: LotSizeFilter;
+        minNotionalQuote: number;
+        baseAsset: string;
+        quoteAsset: string;
+      }
     | { ok: false; error: string }
   > {
     const base = this.getBaseUrl().replace(/\/$/, '');
@@ -320,6 +324,8 @@ export class BinanceSpotService {
       const data = res.data as {
         symbols?: Array<{
           symbol: string;
+          baseAsset?: string;
+          quoteAsset?: string;
           filters?: Array<{
             filterType?: string;
             minQty?: string;
@@ -329,7 +335,10 @@ export class BinanceSpotService {
         }>;
       };
       const s = data.symbols?.find((x) => x.symbol === sym);
-      const lotF = s?.filters?.find((f) => f.filterType === 'LOT_SIZE');
+      if (!s) {
+        return { ok: false, error: `Символ ${sym} не найден в exchangeInfo` };
+      }
+      const lotF = s.filters?.find((f) => f.filterType === 'LOT_SIZE');
       const minQty = lotF?.minQty != null ? parseFloat(lotF.minQty) : NaN;
       const stepSize = lotF?.stepSize != null ? parseFloat(lotF.stepSize) : NaN;
       if (
@@ -343,22 +352,32 @@ export class BinanceSpotService {
           error: `LOT_SIZE не найден или невалиден для ${sym}`,
         };
       }
-      const notionalF = s?.filters?.find(
-        (f) =>
-          f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL',
+      const notionalF = s.filters?.find(
+        (f) => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL',
       );
       const rawN =
         notionalF?.minNotional != null
           ? parseFloat(notionalF.minNotional)
           : NaN;
-      const minNotionalUsdt =
+      const quoteAsset = (s.quoteAsset ?? 'USDT').trim();
+      const baseAsset = (s.baseAsset ?? '').trim();
+      const minNotionalQuote =
         Number.isFinite(rawN) && rawN > 0 ? rawN : defaultMinNotional;
       if (!(Number.isFinite(rawN) && rawN > 0)) {
         this.log.debug(
-          `exchangeInfo: minNotional не найден для ${sym}, используем ${defaultMinNotional} USDT`,
+          `exchangeInfo: minNotional не найден для ${sym}, используем ${defaultMinNotional} (${quoteAsset})`,
         );
       }
-      return { ok: true, lot: { minQty, stepSize }, minNotionalUsdt };
+      if (!baseAsset) {
+        return { ok: false, error: `baseAsset не задан для ${sym}` };
+      }
+      return {
+        ok: true,
+        lot: { minQty, stepSize },
+        minNotionalQuote,
+        baseAsset,
+        quoteAsset,
+      };
     } catch (e) {
       const err = e as AxiosError<{ msg?: string }>;
       return {

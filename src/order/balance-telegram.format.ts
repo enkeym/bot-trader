@@ -1,27 +1,28 @@
-/** Ответ биржи на MARKET-ордер: сколько базы и сколько USDT. */
+/** Ответ биржи на MARKET-ордер: база и сумма в валюте котировки (USDT, RUB, …). */
 export function parseSpotExchangeFill(ex: unknown): {
   baseQty: number;
-  usdt: number;
+  quoteQty: number;
 } {
-  if (!ex || typeof ex !== 'object') return { baseQty: NaN, usdt: NaN };
+  if (!ex || typeof ex !== 'object') return { baseQty: NaN, quoteQty: NaN };
   const o = ex as Record<string, unknown>;
   const eq = o['executedQty'];
   const baseQty = typeof eq === 'string' ? parseFloat(eq) : Number(eq ?? NaN);
   const cq = o['cummulativeQuoteQty'] ?? o['cumQuote'];
-  const usdt = typeof cq === 'string' ? parseFloat(cq) : Number(cq ?? NaN);
-  return { baseQty, usdt };
+  const quoteQty = typeof cq === 'string' ? parseFloat(cq) : Number(cq ?? NaN);
+  return { baseQty, quoteQty };
 }
 
 /**
- * Краткий баланс Spot для Telegram (без лишних терминов).
+ * Краткий баланс Spot для Telegram: сначала котировка, затем база.
  */
 export function formatSpotBalanceShortLines(
+  quoteAsset: string,
   baseAsset: string,
-  usdt: { free: string; locked: string } | undefined,
+  quoteRow: { free: string; locked: string } | undefined,
   baseRow: { free: string; locked: string } | undefined,
 ): string[] {
-  const uf = usdt ? parseFloat(usdt.free) : 0;
-  const ul = usdt ? parseFloat(usdt.locked) : 0;
+  const uf = quoteRow ? parseFloat(quoteRow.free) : 0;
+  const ul = quoteRow ? parseFloat(quoteRow.locked) : 0;
   const uTot = uf + ul;
   const bf = baseRow ? parseFloat(baseRow.free) : 0;
   const bl = baseRow ? parseFloat(baseRow.locked) : 0;
@@ -38,7 +39,7 @@ export function formatSpotBalanceShortLines(
   };
 
   return [
-    `USDT: ${fmtU(uTot)} (свободно ${fmtU(uf)}${ul > 0 ? `, в ордерах ${fmtU(ul)}` : ''})`,
+    `${quoteAsset}: ${fmtU(uTot)} (свободно ${fmtU(uf)}${ul > 0 ? `, в ордерах ${fmtU(ul)}` : ''})`,
     `${baseAsset}: ${fmtB(bTot)} (свободно ${fmtB(bf)}${bl > 0 ? `, в ордерах ${fmtB(bl)}` : ''})`,
   ];
 }

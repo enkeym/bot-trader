@@ -6,6 +6,12 @@ export default () => ({
   redisUrl: process.env.REDIS_URL,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramAlertChatId: process.env.TELEGRAM_ALERT_CHAT_ID,
+  /**
+   * P2P-алерты спреда (SpreadMonitor, раз в 5 мин). По умолчанию выкл. —
+   * в чат уходят только уведомления автоторговли о покупке/продаже/ошибке сделки.
+   */
+  telegramSpreadAlertsEnabled:
+    process.env.TELEGRAM_SPREAD_ALERTS_ENABLED === 'true',
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000',
   adminTelegramIds: (process.env.ADMIN_TELEGRAM_IDS ?? '')
     .split(',')
@@ -19,9 +25,13 @@ export default () => ({
     spotSymbol: process.env.BINANCE_SPOT_SYMBOL ?? 'SOLUSDT',
     spotOrderSide:
       (process.env.BINANCE_SPOT_ORDER_SIDE as 'BUY' | 'SELL') ?? 'BUY',
-    /** Потолок quote (USDT) на один MARKET BUY при DRY_RUN=false */
+    /** Потолок quote на один MARKET BUY (USDT), если котировка пары — USDT */
     spotMaxQuoteUsdt: parseFloat(
       process.env.BINANCE_SPOT_MAX_QUOTE_USDT ?? '20',
+    ),
+    /** Потолок quote в RUB для пар вроде USDTRUB */
+    spotMaxQuoteRub: parseFloat(
+      process.env.BINANCE_SPOT_MAX_QUOTE_RUB ?? '50000',
     ),
     /** Для MARKET SELL — объём в базовом активе (напр. BTC) */
     spotQuantity: parseFloat(process.env.BINANCE_SPOT_QUANTITY ?? '0'),
@@ -49,6 +59,10 @@ export default () => ({
      */
     roundtripMaxPositionUsdt: parseFloat(
       process.env.BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT ?? '0',
+    ),
+    /** Лимит позиции в RUB учёта для USDTRUB (0 = выкл.) */
+    roundtripMaxPositionRub: parseFloat(
+      process.env.BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_RUB ?? '0',
     ),
     /** 0 = выкл. Продажа, если цена упала на N % от пика марка с момента входа (раньше глубокого SL). */
     roundtripEmergencyDrawdownPercent: parseFloat(

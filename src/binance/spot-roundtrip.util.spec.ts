@@ -74,8 +74,8 @@ describe('spot-roundtrip.util emergency & sizing', () => {
       freeBtc: 1,
       trackedBtc: 0.00001,
       lot,
-      markPriceUsdt: 70_000,
-      minNotionalUsdt: 5,
+      markPriceQuote: 70_000,
+      minNotionalQuote: 5,
     });
     expect(r.quantity).toBe(0);
     expect(r.belowMinNotional).toBe(true);
@@ -87,8 +87,8 @@ describe('spot-roundtrip.util emergency & sizing', () => {
       freeBtc: 1,
       trackedBtc: 0.001,
       lot,
-      markPriceUsdt: 70_000,
-      minNotionalUsdt: 5,
+      markPriceQuote: 70_000,
+      minNotionalQuote: 5,
     });
     expect(r.quantity).toBe(0.001);
     expect(r.belowMinNotional).toBeUndefined();

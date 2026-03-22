@@ -23,7 +23,8 @@ export type NormalizedTradeRow = {
   status: string;
   symbol?: string;
   spotSide?: 'BUY' | 'SELL';
-  usdt?: number;
+  /** Сумма в валюте котировки пары */
+  quoteQty?: number;
   baseQty?: number;
   p2pGrossSpreadPercent?: number;
   p2pNetSpreadPercent?: number;
@@ -154,7 +155,7 @@ export class TradeExportService {
     if (r.provider === 'binance_spot') {
       const p = r.payload as SpotLivePayload | null;
       const ex = p?.exchangeResponse;
-      const { baseQty, usdt } = parseSpotExchangeFill(ex);
+      const { baseQty, quoteQty } = parseSpotExchangeFill(ex);
       const rawOid = ex && typeof ex === 'object' ? ex['orderId'] : undefined;
       const exchangeOrderId =
         typeof rawOid === 'string' || typeof rawOid === 'number'
@@ -164,7 +165,7 @@ export class TradeExportService {
         ...base,
         symbol: p?.spot?.symbol ?? defaultSymbol,
         spotSide: p?.spot?.side,
-        usdt: Number.isFinite(usdt) ? usdt : undefined,
+        quoteQty: Number.isFinite(quoteQty) ? quoteQty : undefined,
         baseQty: Number.isFinite(baseQty) ? baseQty : undefined,
         p2pGrossSpreadPercent: p?.p2pSpreadContext?.grossSpreadPercent,
         p2pNetSpreadPercent: p?.p2pSpreadContext?.netSpreadPercent,
