@@ -56,7 +56,9 @@ export default () => ({
       process.env.BINANCE_SPOT_ASSUMED_ROUNDTRIP_FEE_PERCENT ?? '0',
     ),
     /**
-     * 0 = выкл. Если free базы на Spot и учёт tracked расходятся сильнее N % — не торговать (ручные сделки / сбой).
+     * 0 = выкл. Если свободной базы на Spot **меньше**, чем учёт tracked, и недостаток
+     * относительно tracked > N % — не торговать (ручная продажа / перевод / сбой).
+     * Лишний free той же монеты не блокирует (SELL только min(free, tracked)).
      */
     roundtripBalanceDivergenceMaxPct: parseFloat(
       process.env.BINANCE_SPOT_BALANCE_DIVERGENCE_MAX_PCT ?? '0',

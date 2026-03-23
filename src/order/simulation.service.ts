@@ -9,6 +9,7 @@ import {
 import {
   applyBuyFill,
   applySellFill,
+  balanceDivergenceBlocksRoundtrip,
   computePeakMarkPrice,
   computeSellQuantityRespectingMinNotional,
   effectiveTakeProfitPercent,
@@ -447,8 +448,7 @@ export class SimulationService {
     const t = Number(trackedBtc.toFixed(8));
     const a = Number(avgEntryUsdt.toFixed(8));
     const p = Number(peakMarkUsdt.toFixed(8));
-    const recordSell =
-      opts?.recordSellCooldown === true && t <= 1e-12;
+    const recordSell = opts?.recordSellCooldown === true && t <= 1e-12;
     await this.prisma.botState.upsert({
       where: { id: 'default' },
       create: {
@@ -585,18 +585,18 @@ export class SimulationService {
 
     const divMaxPct =
       this.config.get<number>('binance.roundtripBalanceDivergenceMaxPct') ?? 0;
-    if (
-      !dryRun &&
-      divMaxPct > 0 &&
-      tracked >= symFil.lot.minQty - 1e-12
-    ) {
+    if (!dryRun && divMaxPct > 0 && tracked >= symFil.lot.minQty - 1e-12) {
       const balDiv = await this.binanceSpot.getAccountBalances();
       if (balDiv.ok) {
         const rowB = balDiv.balances.find((b) => b.asset === baseAsset);
         const freeB = rowB != null ? parseFloat(rowB.free) : 0;
-        const denom = Math.max(tracked, freeB, 1e-12);
-        const devPct = (Math.abs(freeB - tracked) / denom) * 100;
-        if (devPct > divMaxPct) {
+        const { block, deviationPct: devPct } =
+          balanceDivergenceBlocksRoundtrip({
+            freeBase: freeB,
+            trackedBase: tracked,
+            maxDivergencePct: divMaxPct,
+          });
+        if (block) {
           await this.audit.log('warn', 'roundtrip_skip', {
             reason: 'balance_divergence',
             tracked,

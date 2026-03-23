@@ -79,6 +79,33 @@ export function computeSellQuantityRespectingMinNotional(params: {
   return { quantity: base.quantity };
 }
 
+const BALANCE_DIV_EPS = 1e-10;
+
+/**
+ * Расхождение free базы и учётной позиции для roundtrip.
+ * Блокируем только если на Spot **не хватает** свободной базы относительно учёта
+ * (продажа идёт на min(free, tracked)). Лишний free той же монеты не блокирует.
+ */
+export function balanceDivergenceBlocksRoundtrip(params: {
+  freeBase: number;
+  trackedBase: number;
+  maxDivergencePct: number;
+}): { block: boolean; deviationPct: number } {
+  const { freeBase, trackedBase, maxDivergencePct } = params;
+  if (!(maxDivergencePct > 0) || !(trackedBase > 1e-18)) {
+    return { block: false, deviationPct: 0 };
+  }
+  if (freeBase + BALANCE_DIV_EPS >= trackedBase) {
+    return { block: false, deviationPct: 0 };
+  }
+  const denom = Math.max(trackedBase, freeBase, 1e-12);
+  const deviationPct = (Math.abs(freeBase - trackedBase) / denom) * 100;
+  return {
+    block: deviationPct > maxDivergencePct,
+    deviationPct,
+  };
+}
+
 /** Итоговый тейк: max(конфиг, мин. порог, оценка комиссии круга), если соответствующие > 0. */
 export function effectiveTakeProfitPercent(params: {
   configuredPercent: number;

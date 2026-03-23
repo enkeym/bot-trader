@@ -1,4 +1,5 @@
 import {
+  balanceDivergenceBlocksRoundtrip,
   computePeakMarkPrice,
   computeSellQuantityRespectingMinNotional,
   effectiveTakeProfitPercent,
@@ -7,6 +8,36 @@ import {
 } from './spot-roundtrip.util';
 
 describe('spot-roundtrip.util emergency & sizing', () => {
+  it('balanceDivergenceBlocksRoundtrip: extra free does not block', () => {
+    const r = balanceDivergenceBlocksRoundtrip({
+      freeBase: 5.91,
+      trackedBase: 0.234,
+      maxDivergencePct: 3,
+    });
+    expect(r.block).toBe(false);
+    expect(r.deviationPct).toBe(0);
+  });
+
+  it('balanceDivergenceBlocksRoundtrip: short free vs tracked blocks when over threshold', () => {
+    const r = balanceDivergenceBlocksRoundtrip({
+      freeBase: 0.05,
+      trackedBase: 1,
+      maxDivergencePct: 3,
+    });
+    expect(r.block).toBe(true);
+    expect(r.deviationPct).toBeCloseTo(95, 5);
+  });
+
+  it('balanceDivergenceBlocksRoundtrip: small shortfall under threshold does not block', () => {
+    const r = balanceDivergenceBlocksRoundtrip({
+      freeBase: 0.98,
+      trackedBase: 1,
+      maxDivergencePct: 3,
+    });
+    expect(r.block).toBe(false);
+    expect(r.deviationPct).toBeCloseTo(2, 5);
+  });
+
   it('effectiveTakeProfitPercent', () => {
     expect(
       effectiveTakeProfitPercent({
