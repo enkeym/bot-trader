@@ -171,34 +171,26 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
         const exitPaper =
           rt.chosenSide === 'SELL'
             ? rt.exitKind === 'stop_loss'
-              ? ' · 🛡 стоп'
+              ? ' · стоп'
               : rt.exitKind === 'emergency_drawdown'
-                ? ' · ⚡ аварийный выход'
+                ? ' · аварийно от пика'
                 : rt.exitKind === 'take_profit'
-                  ? ' · 🎯 тейк'
+                  ? ' · тейк'
                   : ''
             : '';
         const lines =
           rt.chosenSide === 'BUY'
             ? [
-                '🟢 ПОКУПКА',
-                `📊 Пара: ${spotSym}`,
-                '',
-                `💱 Курс в шаге: ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
-                `🪙 В учёте после шага: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`,
-                `📈 Средняя цена входа: ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset} / ${baseAsset}`,
+                `🟢 Покупка (тест) ${spotSym}`,
+                `Котировка в шаге ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
+                `После шага в учёте: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset}`,
               ]
             : [
-                '🔴 ПРОДАЖА',
-                `📊 Пара: ${spotSym}${exitPaper}`,
-                '',
-                `💱 Курс в шаге: ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
-                `🪙 В учёте после шага: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}`,
-                `📈 Средняя цена входа: ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset} / ${baseAsset}`,
+                `🔴 Продажа (тест) ${spotSym}${exitPaper}`,
+                `Котировка в шаге ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
+                `После шага в учёте: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset}`,
               ];
-        return [...lines, '', '📋 Запись в журнале · Spot не вызывался'].join(
-          '\n',
-        );
+        return [...lines, '', 'Без биржи, только запись в журнал'].join('\n');
       }
       return [
         '📊 Сигнал стратегии',
@@ -227,13 +219,13 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     const sym = pl?.spot?.symbol ?? spotSym;
     const qa = pl?.spot?.quoteAsset ?? quoteAsset;
     const ba = pl?.spot?.baseAsset ?? baseAsset;
-    const exitLabel =
+    const exitWhy =
       exitKind === 'stop_loss'
-        ? '🛡 стоп-лосс'
+        ? 'Стоп-лосс: марк ниже порога от средней входа.'
         : exitKind === 'emergency_drawdown'
-          ? '⚡ аварийный выход'
+          ? 'Аварийный выход: просадка марка от пика по стратегии.'
           : exitKind === 'take_profit'
-            ? '🎯 тейк-профит'
+            ? 'Тейк-профит: марк выше порога от средней входа (не из-за стопа и не «аварийно»).'
             : null;
 
     const head: string[] = [];
@@ -245,12 +237,10 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     ) {
       const bq = Number(baseQty);
       const qq = Number(quoteQty);
+      const px = bq > 0 ? qq / bq : NaN;
       head.push(
-        '🟢 ПОКУПКА',
-        `📊 Пара: ${sym}`,
-        '',
-        `💵 Списано: ${qq.toFixed(4)} ${qa}`,
-        `🪙 Зачислено: ${bq.toFixed(8)} ${ba}`,
+        `🟢 Покупка ${sym}`,
+        `${bq.toFixed(8)} ${ba} по ~${Number.isFinite(px) ? px.toFixed(2) : '—'} ${qa} за 1 ${ba} · списано ${qq.toFixed(4)} ${qa}`,
       );
     } else if (
       side === 'SELL' &&
@@ -259,26 +249,22 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     ) {
       const bq = Number(baseQty);
       const qq = Number(quoteQty);
+      const px = bq > 0 ? qq / bq : NaN;
+      head.push(`🔴 Продажа ${sym}`);
+      if (exitWhy != null) {
+        head.push(exitWhy);
+      } else {
+        head.push('Тип выхода в payload не указан.');
+      }
       head.push(
-        '🔴 ПРОДАЖА',
-        `📊 Пара: ${sym}` + (exitLabel != null ? ` · ${exitLabel}` : ''),
-        '',
-        `📤 Списано: ${bq.toFixed(8)} ${ba}`,
-        `💵 Зачислено: ${qq.toFixed(4)} ${qa}`,
+        `${bq.toFixed(8)} ${ba} по ~${Number.isFinite(px) ? px.toFixed(2) : '—'} ${qa} за 1 ${ba} · выручка ${qq.toFixed(4)} ${qa}`,
       );
       if (rtp != null && Number.isFinite(rtp)) {
         const cost = qq - rtp;
         const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
         head.push(
-          '',
-          '📒 Эта партия в учёте:',
-          `   🧾 Себестоимость: ${cost.toFixed(4)} ${qa} (по средней входа)`,
-          `   💰 Выручка: ${qq.toFixed(4)} ${qa}`,
-          `   ${rtp >= 0 ? '📈' : '📉'} Результат: ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa}`,
+          `По учёту за партию: ${cost.toFixed(4)} ${qa} → ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa}${pct !== '—' ? ` (${pct}% к входу)` : ''}`,
         );
-        if (pct !== '—') {
-          head.push(`   📊 ~${pct}% к себестоимости (не от всего депозита)`);
-        }
       }
     } else {
       head.push(
@@ -293,14 +279,29 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       const qRow = bal.balances.find((b) => b.asset === qa);
       const bRow = bal.balances.find((x) => x.asset === ba);
       head.push('');
-      head.push('🏦 Счёт Spot сейчас');
+      head.push('Баланс Spot:');
       const balLines = formatSpotBalanceShortLines(qa, ba, qRow, bRow);
       for (const line of balLines) {
-        head.push(line.startsWith(`${qa}:`) ? `💵 ${line}` : `🪙 ${line}`);
+        head.push(line);
       }
     } else {
       head.push('');
-      head.push(`⚠️ Баланс: ${bal.error}`);
+      head.push(`Баланс: ${bal.error}`);
+    }
+
+    if (side === 'BUY' || side === 'SELL') {
+      try {
+        const agg = await this.simulation.getSpotExecutedAgg();
+        if (agg.sellCount > 0) {
+          const p = agg.profitFromSellsUsdt;
+          head.push('');
+          head.push(
+            `Всего реализ. по Spot (оценка бота): ${p >= 0 ? '+' : ''}${p.toFixed(4)} ${qa} (${agg.sellCount} продаж)`,
+          );
+        }
+      } catch {
+        /* ignore */
+      }
     }
 
     return head.join('\n');

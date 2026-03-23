@@ -1310,7 +1310,7 @@ export class SimulationService {
   }
 
   /**
-   * Краткая сводка для Telegram: баланс, сделки, прибыль по продажам.
+   * Сводка для Telegram (/stats): баланс, roundtrip, последние сделки, реализ. P/L Spot.
    */
   async buildTelegramTradingReport(): Promise<string> {
     const dryRun = this.config.get<boolean>('dryRun') ?? true;
@@ -1381,9 +1381,18 @@ export class SimulationService {
     } else if (!hasKeys) {
       lines.push('⚠️ Ключи API не заданы — баланс биржи недоступен.');
     } else {
+      const aggSpot = await this.aggregateSpotExecStats();
+      const tickSym = await this.binanceSpot.getTickerPrice(symbol);
+      const markPrice = tickSym.ok ? tickSym.price : NaN;
       const bal = await this.binanceSpot.getAccountBalances();
+      let baseFreeForRoundtrip = '—';
       if (!bal.ok) {
         lines.push(`⚠️ Баланс: ${bal.error}`);
+        if (Number.isFinite(markPrice) && markPrice > 0) {
+          lines.push(
+            `📈 ${symbol}: ~${fmtQ(markPrice, 2)} ${quoteAsset} за 1 ${baseAsset}`,
+          );
+        }
       } else {
         const qRow = bal.balances.find((b) => b.asset === quoteAsset);
         const bRow = bal.balances.find((b) => b.asset === baseAsset);
@@ -1394,29 +1403,32 @@ export class SimulationService {
         const quoteTot = uf + ul;
         const baseTot = bf + bl;
 
-        const tick = await this.binanceSpot.getTickerPrice(symbol);
-        const mark = tick.ok ? tick.price : NaN;
         const equity =
-          Number.isFinite(mark) && mark > 0 ? quoteTot + baseTot * mark : NaN;
+          Number.isFinite(markPrice) && markPrice > 0
+            ? quoteTot + baseTot * markPrice
+            : NaN;
 
+        if (Number.isFinite(markPrice) && markPrice > 0) {
+          lines.push(
+            `📈 Курс ${symbol}: ~${fmtQ(markPrice, 2)} ${quoteAsset} / 1 ${baseAsset}`,
+          );
+        }
         lines.push(
-          `💵 ${quoteAsset}: ${fmtQ(quoteTot)} · ${baseAsset}: ${fmtQ(baseTot, 8)}`,
+          `💵 ${quoteAsset}: ${fmtQ(quoteTot)} · ${baseAsset}: ${fmtQ(baseTot, 8)} (св. ${fmtQ(uf)} / ${fmtQ(bf, 8)})`,
         );
         if (Number.isFinite(equity)) {
-          lines.push(
-            `💰 Оценка счёта в ${quoteAsset}: ~${fmtQ(equity)} (котировка + база × марк)`,
-          );
+          lines.push(`💰 Оценка ~${fmtQ(equity)} ${quoteAsset}`);
           if (equityBaseline != null && equityBaseline > 0) {
             const diff = equity - equityBaseline;
             const pct = (diff / equityBaseline) * 100;
-            const sign = diff >= 0 ? '📈' : '📉';
             lines.push(
-              `${sign} К старту (${fmtQ(equityBaseline)} ${quoteAsset}): ${diff >= 0 ? '+' : ''}${fmtQ(diff)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`,
+              `${this.arrowForPnl(diff)} Старт ${fmtQ(equityBaseline)} → ${diff >= 0 ? '+' : ''}${fmtQ(diff)} ${quoteAsset} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`,
             );
           }
         } else {
-          lines.push('📍 Марк недоступен — полную оценку счёта не посчитать.');
+          lines.push('📍 Марк недоступен — оценку счёта не посчитать.');
         }
+        baseFreeForRoundtrip = fmtQ(bf, 8);
       }
       lines.push('');
 
@@ -1435,93 +1447,105 @@ export class SimulationService {
             ? Number(st.spotRoundtripPeakMarkUsdt)
             : 0;
 
-        const stratBits: string[] = [
-          `тейк +${effectiveTpPct}% к средней`,
-          `ордер до ${maxQuote} ${quoteAsset}`,
-        ];
-        if (slPct > 0) stratBits.push(`стоп −${slPct}%`);
-        if (maxPosRoundtrip > 0)
-          stratBits.push(`лимит поз. ~${maxPosRoundtrip} ${quoteAsset}`);
-        if (rtAccumulate) stratBits.push('докупки по сигналу');
-        lines.push(`⚙️ Roundtrip: ${stratBits.join(' · ')}`);
-        lines.push('');
-
-        const tick2 = await this.binanceSpot.getTickerPrice(symbol);
-        if (tick2.ok && tracked > 0 && avgE > 0) {
-          const m = tick2.price;
+        const m = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : NaN;
+        if (tracked > 0 && avgE > 0) {
           const tpTh = avgE * (1 + effectiveTpPct / 100);
-          const unreal = tracked * (m - avgE);
-          const unrealPct = ((m - avgE) / avgE) * 100;
-          const uEmoji = unreal >= 0 ? '✅' : '🔻';
-          lines.push(`🎯 Позиция в ${baseAsset}`);
+          const unreal = Number.isFinite(m) ? tracked * (m - avgE) : NaN;
+          const unrealPct = Number.isFinite(m)
+            ? ((m - avgE) / avgE) * 100
+            : NaN;
           lines.push(
-            `   • В учёте: ${tracked.toFixed(8)} · средняя ${fmtQ(avgE, 2)} ${quoteAsset} за 1 ${baseAsset}`,
-          );
-          lines.push(
-            `   • Марк: ~${fmtQ(m, 2)} ${quoteAsset} · нереализ. ${uEmoji} ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} (${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%)`,
-          );
-          lines.push(
-            `   • План продажи (тейк): выше ${fmtQ(tpTh, 2)} ${quoteAsset}`,
+            `🎯 К продаже (бот): ${tracked.toFixed(8)} ${baseAsset} · купили ~${fmtQ(avgE, 2)} ${quoteAsset} → продаём от ~${fmtQ(tpTh, 2)} (тейк +${effectiveTpPct}%)`,
           );
           if (slPct > 0) {
             const slTh = avgE * (1 - slPct / 100);
-            lines.push(`   • Стоп: ниже ${fmtQ(slTh, 2)} ${quoteAsset}`);
+            lines.push(
+              `🛡 Стоп при ≤ ${fmtQ(slTh, 2)} · докупка до ${maxQuote} ${quoteAsset}`,
+            );
+          } else {
+            lines.push(`📎 Докупка до ${maxQuote} ${quoteAsset}`);
+          }
+          if (Number.isFinite(unreal) && Number.isFinite(m)) {
+            lines.push(
+              `${this.arrowForPnl(unreal)} Нереализ.: ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} ${quoteAsset} (${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%) · марк ~${fmtQ(m, 2)}`,
+            );
           }
           if (emPctRt > 0 && peak > 0) {
-            lines.push(
-              `   • Пик марка: ~${fmtQ(peak, 2)} · аварийный выход при −${emPctRt}% от пика`,
-            );
+            lines.push(`⚡ Аварийно: −${emPctRt}% от пика ~${fmtQ(peak, 2)}`);
           }
-          const distTpPct = ((tpTh - m) / m) * 100;
-          if (distTpPct > 0) {
-            lines.push(
-              `   • До тейка: ещё ~${distTpPct.toFixed(2)}% роста от марка`,
-            );
+          if (maxPosRoundtrip > 0) {
+            lines.push(`📊 Лимит поз. ~${maxPosRoundtrip} ${quoteAsset}`);
           }
-        } else if (tracked <= 0) {
-          lines.push(`📭 Открытой учётной позиции нет.`);
+          if (rtAccumulate) {
+            lines.push('➕ Докупки по сигналу включены');
+          }
+        } else {
+          const mk = Number.isFinite(m)
+            ? ` · марк ~${fmtQ(m, 2)} ${quoteAsset}`
+            : '';
+          lines.push(
+            `🎯 Нет позиции бота · своб. ${baseAsset}: ${baseFreeForRoundtrip}${mk}`,
+          );
         }
         lines.push('');
       } else {
-        lines.push(
-          `⚙️ Стратегия: ${spotSide}, до ${maxQuote} ${quoteAsset} за ордер`,
-        );
+        lines.push(`⚙️ ${spotSide} · до ${maxQuote} ${quoteAsset}/ордер`);
         lines.push('');
       }
 
-      const lastBuy = await this.getLastExecutedSpotBuy();
-      if (lastBuy) {
-        const t = lastBuy.createdAt
-          .toISOString()
-          .slice(0, 16)
-          .replace('T', ' ');
-        lines.push('🛒 Последняя покупка на бирже');
-        lines.push(
-          `   • ${t} — ${lastBuy.baseQty.toFixed(8)} ${baseAsset} по ~${fmtQ(lastBuy.avgPrice, 2)} ${quoteAsset} (всего ${fmtQ(lastBuy.quoteQty)} ${quoteAsset})`,
-        );
-        if (spotStrategy === 'roundtrip') {
-          const refAvg = avgE > 0 ? avgE : lastBuy.avgPrice;
-          if (refAvg > 0) {
-            const tpTh = refAvg * (1 + effectiveTpPct / 100);
-            lines.push(
-              `   • Цель (тейк): > ${fmtQ(tpTh, 2)} ${quoteAsset} за 1 ${baseAsset}`,
-            );
-          }
+      const [lastBuy, lastSell] = await Promise.all([
+        this.getLastExecutedSpotBuy(),
+        this.getLastExecutedSpotSell(),
+      ]);
+      if (lastBuy || lastSell) {
+        lines.push('🕐 Последние сделки');
+        if (lastBuy) {
+          const t = lastBuy.createdAt
+            .toISOString()
+            .slice(0, 16)
+            .replace('T', ' ');
+          lines.push(
+            `📥 ${t} · ${lastBuy.baseQty.toFixed(8)} ${baseAsset} @~${fmtQ(lastBuy.avgPrice, 2)} · −${fmtQ(lastBuy.quoteQty)} ${quoteAsset}`,
+          );
+        }
+        if (lastSell) {
+          const t = lastSell.createdAt
+            .toISOString()
+            .slice(0, 16)
+            .replace('T', ' ');
+          const tag =
+            lastSell.exitKind === 'stop_loss'
+              ? '🛡стоп'
+              : lastSell.exitKind === 'emergency_drawdown'
+                ? '⚡авария'
+                : lastSell.exitKind === 'take_profit'
+                  ? '🎯тейк'
+                  : '💸';
+          const rtp = lastSell.realizedPnlUsdt;
+          const pnlStr =
+            rtp != null && Number.isFinite(rtp)
+              ? `${rtp >= 0 ? '+' : ''}${fmtQ(rtp)} ${quoteAsset}`
+              : '—';
+          lines.push(
+            `${this.arrowForPnl(rtp ?? null)} ${t} · продал ${lastSell.baseQty.toFixed(8)} ${baseAsset} @~${fmtQ(lastSell.avgPrice, 2)} · ${fmtQ(lastSell.quoteQty)} ${quoteAsset} · ${tag} · ${pnlStr}`,
+          );
+        }
+        if (spotStrategy === 'roundtrip' && tracked > 0 && avgE > 0) {
+          const tpTh = avgE * (1 + effectiveTpPct / 100);
+          lines.push(`⏳ Тейк при марке ≥ ${fmtQ(tpTh, 2)} ${quoteAsset}`);
         }
         lines.push('');
       }
-      lines.push(`🔗 Сигнал P2P: ${asset}/${fiat} при достаточном спреде`);
+      lines.push(`🔗 P2P: ${asset}/${fiat}`);
       lines.push('');
-      const agg = await this.aggregateSpotExecStats();
-      lines.push('📑 Исполненные ордера Spot');
-      lines.push(
-        `   Покупок: ${agg.buyCount} (~${fmtQ(agg.buyUsdt)} ${quoteAsset}) · Продаж: ${agg.sellCount} (~${fmtQ(agg.sellUsdt)})`,
-      );
-      if (agg.sellCount > 0) {
-        const p = agg.profitFromSellsUsdt;
+      const spotLine = `📑 Spot: ${aggSpot.buyCount}↑ ${fmtQ(aggSpot.buyUsdt)} ${quoteAsset} · ${aggSpot.sellCount}↓ ${fmtQ(aggSpot.sellUsdt)} ${quoteAsset}`;
+      if (aggSpot.sellCount > 0) {
+        const p = aggSpot.profitFromSellsUsdt;
         lines.push(
-          `   Реализованный P/L по продажам: ${p >= 0 ? '+' : ''}${fmtQ(p)} ${quoteAsset}`,
+          `${this.arrowForPnl(p)} Реализ.: ${p >= 0 ? '+' : ''}${fmtQ(p)} ${quoteAsset} · ${spotLine}`,
         );
+      } else {
+        lines.push(spotLine);
       }
     }
 
@@ -1542,6 +1566,17 @@ export class SimulationService {
     }
 
     return lines.join('\n');
+  }
+
+  /** Агрегат исполненных Spot-ордеров (для /stats и уведомлений). */
+  async getSpotExecutedAgg(): Promise<{
+    buyCount: number;
+    sellCount: number;
+    buyUsdt: number;
+    sellUsdt: number;
+    profitFromSellsUsdt: number;
+  }> {
+    return this.aggregateSpotExecStats();
   }
 
   /** Последний исполненный MARKET BUY по Spot (для /stats). */
@@ -1572,6 +1607,44 @@ export class SimulationService {
         baseQty,
         quoteQty,
         avgPrice: quoteQty / baseQty,
+      };
+    }
+    return null;
+  }
+
+  /** Последний исполненный MARKET SELL по Spot (для /stats). */
+  private async getLastExecutedSpotSell(): Promise<{
+    createdAt: Date;
+    baseQty: number;
+    quoteQty: number;
+    avgPrice: number;
+    exitKind: string | null;
+    realizedPnlUsdt: number | null;
+  } | null> {
+    const rows = await this.prisma.orderIntent.findMany({
+      where: { provider: 'binance_spot', status: 'EXECUTED' },
+      orderBy: { createdAt: 'desc' },
+      take: 48,
+      select: { createdAt: true, payload: true },
+    });
+    for (const r of rows) {
+      const p = r.payload as SpotLivePayload | null;
+      if (p?.spot?.side !== 'SELL' || !p.exchangeResponse) continue;
+      const { baseQty, quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
+      if (
+        !Number.isFinite(baseQty) ||
+        baseQty <= 0 ||
+        !Number.isFinite(quoteQty)
+      )
+        continue;
+      const rtp = p.roundtrip?.realizedPnlUsdtEstimate;
+      return {
+        createdAt: r.createdAt,
+        baseQty,
+        quoteQty,
+        avgPrice: quoteQty / baseQty,
+        exitKind: p.roundtrip?.exitKind ?? null,
+        realizedPnlUsdt: rtp != null && Number.isFinite(rtp) ? rtp : null,
       };
     }
     return null;
@@ -1617,6 +1690,14 @@ export class SimulationService {
     };
   }
 
+  /** P/L: зелёный треугольник вверх / красный треугольник вниз. */
+  private arrowForPnl(v: number | null | undefined): string {
+    if (v == null || !Number.isFinite(v)) return '➖';
+    if (v > 0) return '🟢🔺';
+    if (v < 0) return '🔴🔻';
+    return '➖';
+  }
+
   private formatOperationLine(
     r: {
       createdAt: Date;
@@ -1652,7 +1733,8 @@ export class SimulationService {
         Number.isFinite(quoteQty) &&
         Number.isFinite(baseQty)
       ) {
-        return `• ${t} | Купил ${baseQty.toFixed(8)} ${baseAsset} за ${quoteQty.toFixed(4)} ${qa}`;
+        const avgPx = baseQty > 0 ? quoteQty / baseQty : NaN;
+        return `• ${t} | 📥 ${baseQty.toFixed(8)} ${baseAsset} @~${Number.isFinite(avgPx) ? avgPx.toFixed(2) : '—'} ${qa} · −${quoteQty.toFixed(4)} ${qa}`;
       }
       if (
         sd === 'SELL' &&
@@ -1660,21 +1742,22 @@ export class SimulationService {
         Number.isFinite(baseQty)
       ) {
         const ek = p?.roundtrip?.exitKind;
-        const tag =
+        const reason =
           ek === 'stop_loss'
-            ? ' [стоп]'
+            ? '🛡стоп'
             : ek === 'emergency_drawdown'
-              ? ' [аварийно]'
+              ? '⚡авария'
               : ek === 'take_profit'
-                ? ' [тейк]'
-                : '';
+                ? '🎯тейк'
+                : '💸';
+        const avgPx = baseQty > 0 ? quoteQty / baseQty : NaN;
+        const px = Number.isFinite(avgPx) ? avgPx.toFixed(2) : '—';
+        const arr = this.arrowForPnl(rtp ?? null);
         let tail = '';
         if (rtp != null && Number.isFinite(rtp)) {
-          const cost = quoteQty - rtp;
-          const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
-          tail = `; прибыль ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa} (~${pct}% к себестоимости)`;
+          tail = ` ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa}`;
         }
-        return `• ${t} | Продал ${baseQty.toFixed(8)} ${baseAsset}, получил ${quoteQty.toFixed(4)} ${qa}${tag}${tail}`;
+        return `• ${t} | ${arr} ${baseQty.toFixed(8)} ${baseAsset} @~${px} · ${quoteQty.toFixed(4)} ${qa} · ${reason}${tail}`;
       }
       return `• ${t} | ${sd ?? '?'} ${p?.spot?.symbol ?? ''} (детали не распарсились)`;
     }
