@@ -1,11 +1,43 @@
 import {
   computePeakMarkPrice,
   computeSellQuantityRespectingMinNotional,
+  effectiveTakeProfitPercent,
   priceHitsEmergencyDrawdown,
   scaleQuoteByVolatility,
 } from './spot-roundtrip.util';
 
 describe('spot-roundtrip.util emergency & sizing', () => {
+  it('effectiveTakeProfitPercent', () => {
+    expect(
+      effectiveTakeProfitPercent({
+        configuredPercent: 0.15,
+        minPercent: 0,
+        assumedRoundtripFeePercent: 0,
+      }),
+    ).toBe(0.15);
+    expect(
+      effectiveTakeProfitPercent({
+        configuredPercent: 0.15,
+        minPercent: 0.3,
+        assumedRoundtripFeePercent: 0,
+      }),
+    ).toBe(0.3);
+    expect(
+      effectiveTakeProfitPercent({
+        configuredPercent: 0.5,
+        minPercent: 0,
+        assumedRoundtripFeePercent: 0.22,
+      }),
+    ).toBe(0.5);
+    expect(
+      effectiveTakeProfitPercent({
+        configuredPercent: 0.15,
+        minPercent: 0.25,
+        assumedRoundtripFeePercent: 0.28,
+      }),
+    ).toBe(0.28);
+  });
+
   it('computePeakMarkPrice', () => {
     expect(
       computePeakMarkPrice({

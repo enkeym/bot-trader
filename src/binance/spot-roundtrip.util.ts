@@ -79,6 +79,22 @@ export function computeSellQuantityRespectingMinNotional(params: {
   return { quantity: base.quantity };
 }
 
+/** Итоговый тейк: max(конфиг, мин. порог, оценка комиссии круга), если соответствующие > 0. */
+export function effectiveTakeProfitPercent(params: {
+  configuredPercent: number;
+  minPercent: number;
+  assumedRoundtripFeePercent: number;
+}): number {
+  let v = params.configuredPercent;
+  if (params.minPercent > 0) {
+    v = Math.max(v, params.minPercent);
+  }
+  if (params.assumedRoundtripFeePercent > 0) {
+    v = Math.max(v, params.assumedRoundtripFeePercent);
+  }
+  return v;
+}
+
 export function priceHitsTakeProfit(params: {
   markPrice: number;
   avgEntryUsdt: number;

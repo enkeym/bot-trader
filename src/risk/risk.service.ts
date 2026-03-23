@@ -5,7 +5,12 @@ import {
   parseTradingDaysUtc,
   parseTradingWindowUtc,
 } from '../config/trading-schedule.util';
+import { BinanceSpotService } from '../binance/binance-spot.service';
 import { PrismaService } from '../prisma/prisma.service';
+
+export type AutotradeCircuitReason =
+  | 'equity_drawdown_vs_baseline'
+  | 'consecutive_loss_sells';
 
 export interface RiskCheckInput {
   grossSpreadPercent: number;
@@ -31,6 +36,7 @@ export class RiskService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly binanceSpot: BinanceSpotService,
   ) {}
 
   get minSpreadPercent(): number {
@@ -130,5 +136,89 @@ export class RiskService {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Пауза автоторговли при просадке эквити относительно STATS_EQUITY_BASELINE_USDT
+   * или при серии убыточных SELL (реальные ордера, не DRY_RUN).
+   */
+  async checkAutotradeCircuitBreakers(
+    now: Date = new Date(),
+  ): Promise<
+    { ok: true } | { ok: false; reason: AutotradeCircuitReason }
+  > {
+    const dryRun = this.config.get<boolean>('dryRun') ?? true;
+    if (dryRun) return { ok: true };
+
+    const eq = await this.checkEquityDrawdownVsBaseline(now);
+    if (!eq.ok) return eq;
+
+    return this.checkConsecutiveLosingSells();
+  }
+
+  private async checkEquityDrawdownVsBaseline(
+    _now: Date,
+  ): Promise<
+    { ok: true } | { ok: false; reason: 'equity_drawdown_vs_baseline' }
+  > {
+    const baseline =
+      this.config.get<number | null>('stats.equityBaselineQuote') ?? null;
+    const maxDd =
+      this.config.get<number>('autoTrade.maxEquityDrawdownPercent') ?? 0;
+    if (baseline == null || baseline <= 0 || !(maxDd > 0)) {
+      return { ok: true };
+    }
+
+    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
+    const tick = await this.binanceSpot.getTickerPrice(symbol);
+    if (!tick.ok) return { ok: true };
+
+    const pairFil = await this.binanceSpot.getLotSizeFilter(symbol);
+    if (!pairFil.ok) return { ok: true };
+
+    const bal = await this.binanceSpot.getAccountBalances();
+    if (!bal.ok) return { ok: true };
+
+    const { quoteAsset, baseAsset } = pairFil;
+    const qRow = bal.balances.find((b) => b.asset === quoteAsset);
+    const bRow = bal.balances.find((b) => b.asset === baseAsset);
+    const quoteTot =
+      parseFloat(qRow?.free ?? '0') + parseFloat(qRow?.locked ?? '0');
+    const baseTot =
+      parseFloat(bRow?.free ?? '0') + parseFloat(bRow?.locked ?? '0');
+    const equity = quoteTot + baseTot * tick.price;
+    const floor = baseline * (1 - maxDd / 100);
+    if (equity < floor) {
+      return { ok: false, reason: 'equity_drawdown_vs_baseline' };
+    }
+    return { ok: true };
+  }
+
+  private async checkConsecutiveLosingSells(): Promise<
+    { ok: true } | { ok: false; reason: 'consecutive_loss_sells' }
+  > {
+    const n = this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
+    if (!(n > 0)) return { ok: true };
+
+    const rows = await this.prisma.orderIntent.findMany({
+      where: {
+        provider: 'binance_spot',
+        status: 'EXECUTED',
+        side: { contains: 'SELL' },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: n,
+      select: { payload: true },
+    });
+    if (rows.length < n) return { ok: true };
+
+    for (const row of rows) {
+      const est = (row.payload as SpotPayloadForLoss | null)?.roundtrip
+        ?.realizedPnlUsdtEstimate;
+      if (est == null || typeof est !== 'number' || est >= 0) {
+        return { ok: true };
+      }
+    }
+    return { ok: false, reason: 'consecutive_loss_sells' };
   }
 }

@@ -89,6 +89,31 @@ export function sliceLastHours(
   return candles.slice(-n);
 }
 
+/** Максимум high по свечам окна (для фильтра «не покупать у локального хая»). */
+export function maxHighInCandles(candles: KlineCandle[]): number {
+  if (candles.length === 0) return NaN;
+  let m = -Infinity;
+  for (const c of candles) {
+    if (c.high > m) m = c.high;
+  }
+  return m;
+}
+
+/**
+ * Макс. high для запрошенного горизонта: используются агрегаты 24h / 7d / 30d с Binance klines.
+ * hours ≤ 24 → h24, ≤ 168 → h168, иначе h720.
+ */
+export function windowHighForHours(
+  highs: { h24: number; h168: number; h720: number },
+  hours: number,
+): number {
+  if (!Number.isFinite(hours) || hours <= 0) return NaN;
+  const h = Math.floor(hours);
+  if (h <= 24) return highs.h24;
+  if (h <= 168) return highs.h168;
+  return highs.h720;
+}
+
 export function buildHourlyWindows(hourlyCandles: KlineCandle[]): {
   h24: WindowStats;
   h168: WindowStats;

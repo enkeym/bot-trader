@@ -29,6 +29,7 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   private intervalRef: ReturnType<typeof setInterval> | null = null;
   private lastScheduleSkipAuditAt = 0;
   private lastDailyLimitAuditAt = 0;
+  private lastCircuitAuditAt = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -109,6 +110,19 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
         this.lastDailyLimitAuditAt = t;
         void this.audit.log('info', 'autotrade_skipped_daily_limit', {
           reason: daily.reason,
+          utc: now.toISOString(),
+        });
+      }
+      return;
+    }
+
+    const circuit = await this.risk.checkAutotradeCircuitBreakers(now);
+    if (!circuit.ok) {
+      const t = Date.now();
+      if (t - this.lastCircuitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
+        this.lastCircuitAuditAt = t;
+        void this.audit.log('info', 'autotrade_skipped_circuit', {
+          reason: circuit.reason,
           utc: now.toISOString(),
         });
       }

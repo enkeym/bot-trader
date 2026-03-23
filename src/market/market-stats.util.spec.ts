@@ -2,8 +2,10 @@ import {
   buildHourlyWindows,
   cautionFromStats,
   computeWindowStats,
+  maxHighInCandles,
   parseBinanceKline,
   sliceLastHours,
+  windowHighForHours,
 } from './market-stats.util';
 
 describe('market-stats.util', () => {
@@ -53,6 +55,21 @@ describe('market-stats.util', () => {
     expect(w.h24.hours).toBe(24);
     expect(w.h168.hours).toBe(168);
     expect(w.h720.hours).toBe(720);
+  });
+
+  it('maxHighInCandles', () => {
+    const candles = [
+      { openTime: 1, open: 100, high: 102, low: 99, close: 100 },
+      { openTime: 2, open: 100, high: 105, low: 100, close: 101 },
+    ];
+    expect(maxHighInCandles(candles)).toBe(105);
+  });
+
+  it('windowHighForHours maps to h24 / h168 / h720', () => {
+    const highs = { h24: 10, h168: 20, h720: 30 };
+    expect(windowHighForHours(highs, 12)).toBe(10);
+    expect(windowHighForHours(highs, 48)).toBe(20);
+    expect(windowHighForHours(highs, 200)).toBe(30);
   });
 
   it('cautionFromStats elevated on dump + vol', () => {

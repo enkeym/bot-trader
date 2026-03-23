@@ -5,11 +5,14 @@ import { RedisService } from '../redis/redis.service';
 import {
   buildHourlyWindows,
   cautionFromStats,
+  maxHighInCandles,
   parseBinanceKline,
+  sliceLastHours,
   type WindowStats,
 } from './market-stats.util';
 
-const CACHE_PREFIX = 'market:stats:';
+/** v2: отчёт включает windowHighs для фильтра входа */
+const CACHE_PREFIX = 'market:stats:v2:';
 
 export type MarketStatsReport = {
   symbol: string;
@@ -20,6 +23,8 @@ export type MarketStatsReport = {
     h168: WindowStats;
     h720: WindowStats;
   };
+  /** Макс. high за 24h / 7d / 30d (по тем же свечам, что windows). */
+  windowHighs: { h24: number; h168: number; h720: number };
   caution: ReturnType<typeof cautionFromStats>;
   disclaimer: string;
   fetchedAt: string;
@@ -152,6 +157,14 @@ export class MarketStatsService {
     }
 
     const windows = buildHourlyWindows(candles);
+    const w24 = sliceLastHours(candles, 24);
+    const w168 = sliceLastHours(candles, 168);
+    const w720 = sliceLastHours(candles, 720);
+    const windowHighs = {
+      h24: maxHighInCandles(w24),
+      h168: maxHighInCandles(w168),
+      h720: maxHighInCandles(w720),
+    };
     const caution = cautionFromStats(windows);
     const baseDisclaimer =
       'Справочная аналитика по публичным свечам Binance, не инвестиционная рекомендация.';
@@ -160,12 +173,24 @@ export class MarketStatsService {
       interval: '1h',
       candlesUsed: candles.length,
       windows,
+      windowHighs,
       caution,
       disclaimer: usedFallback
         ? `${baseDisclaimer} Показаны свечи ${sym}: запрошенный символ на ${baseUrl} недоступен (часто на testnet нет USDTRUB и др.).`
         : baseDisclaimer,
       fetchedAt: new Date().toISOString(),
     };
+
+    const spotSymConfigured = (
+      this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT'
+    )
+      .toUpperCase()
+      .replace(/\s+/g, '');
+    if (sym.toUpperCase() !== spotSymConfigured) {
+      this.log.warn(
+        `market stats: символ свечей ${sym} ≠ BINANCE_SPOT_SYMBOL=${spotSymConfigured} — фильтры roundtrip должны запрашивать свечи той же пары (getReport(symbol) из автоторговли).`,
+      );
+    }
 
     await this.redis.setJson(cacheKey, report, ttl);
     this.memoryCache.set(cacheKey, { at: now, report });

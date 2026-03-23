@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS "BotState" (
       await tx.$executeRawUnsafe(
         `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "spotRoundtripPeakMarkUsdt" DECIMAL(18,8) NOT NULL DEFAULT 0`,
       );
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "spotRoundtripLastSellAt" TIMESTAMP(3)`,
+      );
     });
   }
 

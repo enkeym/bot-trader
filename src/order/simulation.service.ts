@@ -11,11 +11,13 @@ import {
   applySellFill,
   computePeakMarkPrice,
   computeSellQuantityRespectingMinNotional,
+  effectiveTakeProfitPercent,
   priceHitsEmergencyDrawdown,
   priceHitsStopLoss,
   priceHitsTakeProfit,
   scaleQuoteByVolatility,
 } from '../binance/spot-roundtrip.util';
+import { windowHighForHours } from '../market/market-stats.util';
 import { MarketStatsService } from '../market/market-stats.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -440,10 +442,13 @@ export class SimulationService {
     trackedBtc: number,
     avgEntryUsdt: number,
     peakMarkUsdt: number,
+    opts?: { recordSellCooldown?: boolean },
   ) {
     const t = Number(trackedBtc.toFixed(8));
     const a = Number(avgEntryUsdt.toFixed(8));
     const p = Number(peakMarkUsdt.toFixed(8));
+    const recordSell =
+      opts?.recordSellCooldown === true && t <= 1e-12;
     await this.prisma.botState.upsert({
       where: { id: 'default' },
       create: {
@@ -451,11 +456,13 @@ export class SimulationService {
         spotTrackedBtc: new Prisma.Decimal(String(t)),
         spotAvgEntryUsdt: new Prisma.Decimal(String(a)),
         spotRoundtripPeakMarkUsdt: new Prisma.Decimal(String(p)),
+        spotRoundtripLastSellAt: recordSell ? new Date() : null,
       },
       update: {
         spotTrackedBtc: new Prisma.Decimal(String(t)),
         spotAvgEntryUsdt: new Prisma.Decimal(String(a)),
         spotRoundtripPeakMarkUsdt: new Prisma.Decimal(String(p)),
+        ...(recordSell ? { spotRoundtripLastSellAt: new Date() } : {}),
       },
     });
   }
@@ -496,6 +503,16 @@ export class SimulationService {
       this.config.get<number>('binance.spotMaxQuoteRub') ?? 50_000;
     const tpPercent =
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
+    const minTpPct =
+      this.config.get<number>('binance.roundtripMinTakeProfitPercent') ?? 0;
+    const assumedRoundtripFeePct =
+      this.config.get<number>('binance.roundtripAssumedRoundtripFeePercent') ??
+      0;
+    const effectiveTpPercent = effectiveTakeProfitPercent({
+      configuredPercent: tpPercent,
+      minPercent: minTpPct,
+      assumedRoundtripFeePercent: assumedRoundtripFeePct,
+    });
     const slPercent =
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
     const maxPosUsdt =
@@ -565,6 +582,44 @@ export class SimulationService {
       prevPeakMarkUsdt: prevPeak,
       markPrice,
     });
+
+    const divMaxPct =
+      this.config.get<number>('binance.roundtripBalanceDivergenceMaxPct') ?? 0;
+    if (
+      !dryRun &&
+      divMaxPct > 0 &&
+      tracked >= symFil.lot.minQty - 1e-12
+    ) {
+      const balDiv = await this.binanceSpot.getAccountBalances();
+      if (balDiv.ok) {
+        const rowB = balDiv.balances.find((b) => b.asset === baseAsset);
+        const freeB = rowB != null ? parseFloat(rowB.free) : 0;
+        const denom = Math.max(tracked, freeB, 1e-12);
+        const devPct = (Math.abs(freeB - tracked) / denom) * 100;
+        if (devPct > divMaxPct) {
+          await this.audit.log('warn', 'roundtrip_skip', {
+            reason: 'balance_divergence',
+            tracked,
+            freeBase: freeB,
+            deviationPct: devPct,
+            maxAllowedPct: divMaxPct,
+            baseAsset,
+            symbol,
+          });
+          await this.persistRoundtripState(tracked, avgEntry, peakMark);
+          return {
+            ev,
+            ok: true,
+            dryRun,
+            executionMode,
+            order: null,
+            estimatedProfitUsdt,
+            orderCreated: false,
+          };
+        }
+      }
+    }
+
     const emPct =
       this.config.get<number>('binance.roundtripEmergencyDrawdownPercent') ?? 0;
     const emergencyHit =
@@ -582,7 +637,7 @@ export class SimulationService {
       priceHitsTakeProfit({
         markPrice,
         avgEntryUsdt: avgEntry,
-        takeProfitPercent: tpPercent,
+        takeProfitPercent: effectiveTpPercent,
       });
     const slHit =
       tracked > 0 &&
@@ -679,7 +734,7 @@ export class SimulationService {
       resolvedSide = 'SELL';
       sellQty = quantity;
     } else if (!accumulateOnSignal && tracked > 0) {
-      const tpThreshold = avgEntry * (1 + tpPercent / 100);
+      const tpThreshold = avgEntry * (1 + effectiveTpPercent / 100);
       const slThreshold =
         slPercent > 0 ? avgEntry * (1 - slPercent / 100) : null;
       await this.audit.log('info', 'roundtrip_skip', {
@@ -689,7 +744,7 @@ export class SimulationService {
         markPrice,
         tpThresholdUsdt: tpThreshold,
         slThresholdUsdt: slThreshold,
-        tpPercent,
+        tpPercent: effectiveTpPercent,
         slPercent,
         peakMarkUsdt: peakMark,
         symbol,
@@ -705,6 +760,35 @@ export class SimulationService {
         orderCreated: false,
       };
     } else {
+      const cooldownMs =
+        this.config.get<number>('binance.buyCooldownAfterSellMs') ?? 0;
+      const lastSellAt = st?.spotRoundtripLastSellAt ?? null;
+      if (
+        cooldownMs > 0 &&
+        lastSellAt != null &&
+        Date.now() - lastSellAt.getTime() < cooldownMs
+      ) {
+        await this.audit.log('info', 'roundtrip_skip', {
+          reason: 'skip_buy_cooldown_after_sell',
+          cooldownMs,
+          lastSellAt: lastSellAt.toISOString(),
+          elapsedMs: Date.now() - lastSellAt.getTime(),
+          symbol,
+        });
+        if (tracked > 0) {
+          await this.persistRoundtripState(tracked, avgEntry, peakMark);
+        }
+        return {
+          ev,
+          ok: true,
+          dryRun,
+          executionMode,
+          order: null,
+          estimatedProfitUsdt,
+          orderCreated: false,
+        };
+      }
+
       const skipVol =
         this.config.get<number>('binance.skipBuyVolatilityStdevGt') ?? 0;
       const skipCh24 =
@@ -762,6 +846,105 @@ export class SimulationService {
             estimatedProfitUsdt,
             orderCreated: false,
           };
+        }
+      }
+
+      const skipCh24Lt =
+        this.config.get<number>('binance.skipBuyChange24hLt') ?? 0;
+      if (regimeReport && skipCh24Lt < 0) {
+        const chLo = regimeReport.windows.h24.changePct;
+        if (Number.isFinite(chLo) && chLo < skipCh24Lt) {
+          await this.audit.log('info', 'roundtrip_skip', {
+            reason: 'skip_buy_downtrend_24h',
+            changePct24h: chLo,
+            thresholdLt: skipCh24Lt,
+            symbol,
+          });
+          if (tracked > 0) {
+            await this.persistRoundtripState(tracked, avgEntry, peakMark);
+          }
+          return {
+            ev,
+            ok: true,
+            dryRun,
+            executionMode,
+            order: null,
+            estimatedProfitUsdt,
+            orderCreated: false,
+          };
+        }
+      }
+
+      const skipCh168Lt =
+        this.config.get<number>('binance.skipBuyChange168hLt') ?? 0;
+      if (regimeReport && skipCh168Lt < 0) {
+        const ch7 = regimeReport.windows.h168.changePct;
+        if (Number.isFinite(ch7) && ch7 < skipCh168Lt) {
+          await this.audit.log('info', 'roundtrip_skip', {
+            reason: 'skip_buy_downtrend_7d',
+            changePct168h: ch7,
+            thresholdLt: skipCh168Lt,
+            symbol,
+          });
+          if (tracked > 0) {
+            await this.persistRoundtripState(tracked, avgEntry, peakMark);
+          }
+          return {
+            ev,
+            ok: true,
+            dryRun,
+            executionMode,
+            order: null,
+            estimatedProfitUsdt,
+            orderCreated: false,
+          };
+        }
+      }
+
+      const pullbackH =
+        this.config.get<number>('binance.buyPullbackWindowHours') ?? 0;
+      const minPullbackPct =
+        this.config.get<number>('binance.buyMinPullbackFromHighPct') ?? 0;
+      if (
+        regimeReport &&
+        pullbackH > 0 &&
+        minPullbackPct > 0 &&
+        regimeReport.windowHighs != null
+      ) {
+        const windowHigh = windowHighForHours(
+          regimeReport.windowHighs,
+          pullbackH,
+        );
+        if (
+          Number.isFinite(windowHigh) &&
+          windowHigh > 0 &&
+          Number.isFinite(markPrice) &&
+          markPrice > 0
+        ) {
+          const dropFromHighPct = ((windowHigh - markPrice) / windowHigh) * 100;
+          if (dropFromHighPct + 1e-9 < minPullbackPct) {
+            await this.audit.log('info', 'roundtrip_skip', {
+              reason: 'skip_buy_near_window_high',
+              pullbackWindowHours: pullbackH,
+              windowHigh,
+              markPrice,
+              dropFromHighPct,
+              minPullbackFromHighPct: minPullbackPct,
+              symbol,
+            });
+            if (tracked > 0) {
+              await this.persistRoundtripState(tracked, avgEntry, peakMark);
+            }
+            return {
+              ev,
+              ok: true,
+              dryRun,
+              executionMode,
+              order: null,
+              estimatedProfitUsdt,
+              orderCreated: false,
+            };
+          }
         }
       }
 
@@ -894,7 +1077,9 @@ export class SimulationService {
       }
 
       const peakAfter = trackedAfter > 0 ? Math.max(peakMark, markPrice) : 0;
-      await this.persistRoundtripState(trackedAfter, avgAfter, peakAfter);
+      await this.persistRoundtripState(trackedAfter, avgAfter, peakAfter, {
+        recordSellCooldown: resolvedSide === 'SELL',
+      });
 
       const payload: SimPayload = {
         grossSpreadPercent: gross,
@@ -910,7 +1095,7 @@ export class SimulationService {
           chosenSide: resolvedSide,
           trackedBtcAfter: trackedAfter,
           avgEntryUsdtAfter: avgAfter,
-          takeProfitPercent: tpPercent,
+          takeProfitPercent: effectiveTpPercent,
           ...(resolvedSide === 'SELL'
             ? {
                 realizedPnlUsdtEstimate: realizedEst,
@@ -1072,7 +1257,9 @@ export class SimulationService {
     }
 
     const peakAfterLive = trackedAfter > 0 ? Math.max(peakMark, markPrice) : 0;
-    await this.persistRoundtripState(trackedAfter, avgAfter, peakAfterLive);
+    await this.persistRoundtripState(trackedAfter, avgAfter, peakAfterLive, {
+      recordSellCooldown: resolvedSide === 'SELL',
+    });
 
     const execPayload: SpotLivePayload = {
       p2pSpreadContext,
@@ -1082,7 +1269,7 @@ export class SimulationService {
       roundtrip: {
         trackedBtcAfter: trackedAfter,
         avgEntryUsdtAfter: avgAfter,
-        takeProfitPercent: tpPercent,
+        takeProfitPercent: effectiveTpPercent,
         markPrice,
         realizedPnlUsdtEstimate:
           resolvedSide === 'SELL' ? realizedEst : undefined,
@@ -1138,14 +1325,12 @@ export class SimulationService {
       this.config.get<number>('binance.spotMaxQuoteUsdt') ?? 20;
     const maxQuoteRub =
       this.config.get<number>('binance.spotMaxQuoteRub') ?? 50_000;
-    const maxQuote =
-      quoteAsset === 'RUB' ? maxQuoteRub : maxQuoteUsdt;
+    const maxQuote = quoteAsset === 'RUB' ? maxQuoteRub : maxQuoteUsdt;
     const maxPosUsdt =
       this.config.get<number>('binance.roundtripMaxPositionUsdt') ?? 0;
     const maxPosRub =
       this.config.get<number>('binance.roundtripMaxPositionRub') ?? 0;
-    const maxPosRoundtrip =
-      quoteAsset === 'RUB' ? maxPosRub : maxPosUsdt;
+    const maxPosRoundtrip = quoteAsset === 'RUB' ? maxPosRub : maxPosUsdt;
     const spotStrategy =
       this.config.get<'fixed_side' | 'roundtrip'>('binance.spotStrategy') ??
       'fixed_side';
@@ -1153,6 +1338,16 @@ export class SimulationService {
       this.config.get<'BUY' | 'SELL'>('binance.spotOrderSide') ?? 'BUY';
     const tpPct =
       this.config.get<number>('binance.roundtripTakeProfitPercent') ?? 0.15;
+    const minTpPct =
+      this.config.get<number>('binance.roundtripMinTakeProfitPercent') ?? 0;
+    const assumedFeePct =
+      this.config.get<number>('binance.roundtripAssumedRoundtripFeePercent') ??
+      0;
+    const effectiveTpPct = effectiveTakeProfitPercent({
+      configuredPercent: tpPct,
+      minPercent: minTpPct,
+      assumedRoundtripFeePercent: assumedFeePct,
+    });
     const slPct =
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
     const rtAccumulate =
@@ -1202,11 +1397,11 @@ export class SimulationService {
         const tick = await this.binanceSpot.getTickerPrice(symbol);
         const mark = tick.ok ? tick.price : NaN;
         const equity =
-          Number.isFinite(mark) && mark > 0
-            ? quoteTot + baseTot * mark
-            : NaN;
+          Number.isFinite(mark) && mark > 0 ? quoteTot + baseTot * mark : NaN;
 
-        lines.push(`💵 ${quoteAsset}: ${fmtQ(quoteTot)} · ${baseAsset}: ${fmtQ(baseTot, 8)}`);
+        lines.push(
+          `💵 ${quoteAsset}: ${fmtQ(quoteTot)} · ${baseAsset}: ${fmtQ(baseTot, 8)}`,
+        );
         if (Number.isFinite(equity)) {
           lines.push(
             `💰 Оценка счёта в ${quoteAsset}: ~${fmtQ(equity)} (котировка + база × марк)`,
@@ -1241,7 +1436,7 @@ export class SimulationService {
             : 0;
 
         const stratBits: string[] = [
-          `тейк +${tpPct}% к средней`,
+          `тейк +${effectiveTpPct}% к средней`,
           `ордер до ${maxQuote} ${quoteAsset}`,
         ];
         if (slPct > 0) stratBits.push(`стоп −${slPct}%`);
@@ -1254,7 +1449,7 @@ export class SimulationService {
         const tick2 = await this.binanceSpot.getTickerPrice(symbol);
         if (tick2.ok && tracked > 0 && avgE > 0) {
           const m = tick2.price;
-          const tpTh = avgE * (1 + tpPct / 100);
+          const tpTh = avgE * (1 + effectiveTpPct / 100);
           const unreal = tracked * (m - avgE);
           const unrealPct = ((m - avgE) / avgE) * 100;
           const uEmoji = unreal >= 0 ? '✅' : '🔻';
@@ -1270,9 +1465,7 @@ export class SimulationService {
           );
           if (slPct > 0) {
             const slTh = avgE * (1 - slPct / 100);
-            lines.push(
-              `   • Стоп: ниже ${fmtQ(slTh, 2)} ${quoteAsset}`,
-            );
+            lines.push(`   • Стоп: ниже ${fmtQ(slTh, 2)} ${quoteAsset}`);
           }
           if (emPctRt > 0 && peak > 0) {
             lines.push(
@@ -1309,7 +1502,7 @@ export class SimulationService {
         if (spotStrategy === 'roundtrip') {
           const refAvg = avgE > 0 ? avgE : lastBuy.avgPrice;
           if (refAvg > 0) {
-            const tpTh = refAvg * (1 + tpPct / 100);
+            const tpTh = refAvg * (1 + effectiveTpPct / 100);
             lines.push(
               `   • Цель (тейк): > ${fmtQ(tpTh, 2)} ${quoteAsset} за 1 ${baseAsset}`,
             );
@@ -1317,9 +1510,7 @@ export class SimulationService {
         }
         lines.push('');
       }
-      lines.push(
-        `🔗 Сигнал P2P: ${asset}/${fiat} при достаточном спреде`,
-      );
+      lines.push(`🔗 Сигнал P2P: ${asset}/${fiat} при достаточном спреде`);
       lines.push('');
       const agg = await this.aggregateSpotExecStats();
       lines.push('📑 Исполненные ордера Spot');
@@ -1456,10 +1647,18 @@ export class SimulationService {
       const qa = p?.spot?.quoteAsset ?? 'USDT';
       const sd = p?.spot?.side;
       const rtp = p?.roundtrip?.realizedPnlUsdtEstimate;
-      if (sd === 'BUY' && Number.isFinite(quoteQty) && Number.isFinite(baseQty)) {
+      if (
+        sd === 'BUY' &&
+        Number.isFinite(quoteQty) &&
+        Number.isFinite(baseQty)
+      ) {
         return `• ${t} | Купил ${baseQty.toFixed(8)} ${baseAsset} за ${quoteQty.toFixed(4)} ${qa}`;
       }
-      if (sd === 'SELL' && Number.isFinite(quoteQty) && Number.isFinite(baseQty)) {
+      if (
+        sd === 'SELL' &&
+        Number.isFinite(quoteQty) &&
+        Number.isFinite(baseQty)
+      ) {
         const ek = p?.roundtrip?.exitKind;
         const tag =
           ek === 'stop_loss'

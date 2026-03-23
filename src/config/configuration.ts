@@ -44,6 +44,24 @@ export default () => ({
       process.env.BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT ?? '0.15',
     ),
     /**
+     * 0 = выкл. Нижняя граница тейка (%) — не уже, чем комиссии/slippage (напр. 0.28).
+     */
+    roundtripMinTakeProfitPercent: parseFloat(
+      process.env.BINANCE_SPOT_ROUNDTRIP_MIN_TAKE_PROFIT_PERCENT ?? '0',
+    ),
+    /**
+     * 0 = выкл. Оценка полного круга BUY+SELL в % (обе стороны taker и т.д.) — поднимает эффективный тейк.
+     */
+    roundtripAssumedRoundtripFeePercent: parseFloat(
+      process.env.BINANCE_SPOT_ASSUMED_ROUNDTRIP_FEE_PERCENT ?? '0',
+    ),
+    /**
+     * 0 = выкл. Если free базы на Spot и учёт tracked расходятся сильнее N % — не торговать (ручные сделки / сбой).
+     */
+    roundtripBalanceDivergenceMaxPct: parseFloat(
+      process.env.BINANCE_SPOT_BALANCE_DIVERGENCE_MAX_PCT ?? '0',
+    ),
+    /**
      * true — при каждом сигнале докупать, пока TP не достигнут (старое поведение).
      * false — пока есть учётная позиция и TP не сработал, не BUY (ждём роста цены до SELL).
      */
@@ -75,6 +93,36 @@ export default () => ({
     /** 0 = выкл. Не BUY, если рост close за 24h выше N % (перегрев). */
     skipBuyChange24hGt: parseFloat(
       process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_24H_GT ?? '0',
+    ),
+    /**
+     * 0 = выкл. Если < 0 (напр. -2): не BUY, когда изменение close за 24h ниже порога
+     * (сильное падение — не набирать позицию на каждом P2P-сигнале).
+     */
+    skipBuyChange24hLt: parseFloat(
+      process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_24H_LT ?? '0',
+    ),
+    /**
+     * 0 = выкл. Если < 0: то же по окну 7d (168h) — отсечь затяжной даунтренд.
+     */
+    skipBuyChange168hLt: parseFloat(
+      process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_168H_LT ?? '0',
+    ),
+    /** 0 = выкл. После успешного SELL, полностью закрывшего учётную позицию, не BUY N мс. */
+    buyCooldownAfterSellMs: parseInt(
+      process.env.BINANCE_SPOT_BUY_COOLDOWN_AFTER_SELL_MS ?? '0',
+      10,
+    ),
+    /**
+     * 0 = выкл. Окно часов для макс. high свечей (фактически: ≤24 → h24, ≤168 → h168, иначе h720).
+     * Вместе с buyMinPullbackFromHighPct отсекает покупки у локального хая.
+     */
+    buyPullbackWindowHours: parseInt(
+      process.env.BINANCE_SPOT_BUY_PULLBACK_WINDOW_HOURS ?? '0',
+      10,
+    ),
+    /** 0 = выкл. Мин. откат марка от макс. high в окне, % (напр. 0.12 = не покупать у хая). */
+    buyMinPullbackFromHighPct: parseFloat(
+      process.env.BINANCE_SPOT_BUY_MIN_PULLBACK_FROM_HIGH_PCT ?? '0',
     ),
     quoteVolatilityScaleEnabled:
       process.env.BINANCE_SPOT_QUOTE_VOLATILITY_SCALE === 'true',
@@ -111,6 +159,13 @@ export default () => ({
     dailyMaxLossUsdt: parseFloat(process.env.DAILY_MAX_LOSS_USDT ?? '50'),
     /** 0 = выкл. Макс. число исполненных Spot-ордеров за сутки (UTC). */
     maxDailySpotTrades: parseInt(process.env.MAX_DAILY_SPOT_TRADES ?? '0', 10),
+    /**
+     * 0 = выкл. Пауза, если подряд N исполненных SELL roundtrip с отрицательным realizedPnlUsdtEstimate.
+     */
+    maxConsecutiveLossSells: parseInt(
+      process.env.MAX_CONSECUTIVE_LOSS_SELLS ?? '0',
+      10,
+    ),
     takerFeePercent: parseFloat(process.env.P2P_TAKER_FEE_PERCENT ?? '0'),
   },
   ton: {
@@ -125,6 +180,13 @@ export default () => ({
     tradingWindowUtc: process.env.TRADING_WINDOW_UTC ?? '',
     /** UTC дни: `1-5` (Пн–Пт), пусто = все дни */
     tradingDaysUtc: process.env.TRADING_DAYS_UTC ?? '',
+    /**
+     * 0 = выкл. При заданном STATS_EQUITY_BASELINE_USDT — пауза автоторговли,
+     * если оценка счёта в quote упала ниже baseline более чем на N %.
+     */
+    maxEquityDrawdownPercent: parseFloat(
+      process.env.AUTO_TRADE_MAX_EQUITY_DRAWDOWN_PERCENT ?? '0',
+    ),
   },
   /** Виртуальный стартовый баланс для отчёта /stats (бумага) */
   paper: {
