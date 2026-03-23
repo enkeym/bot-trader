@@ -12,7 +12,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { SimulationService } from '../order/simulation.service';
 import { TradeExportService } from '../order/trade-export.service';
-import { TonService } from '../ton/ton.service';
 
 const MAX_MSG = 4000;
 
@@ -34,7 +33,6 @@ export class TelegramService
     private readonly config: ConfigService,
     private readonly simulation: SimulationService,
     private readonly prisma: PrismaService,
-    private readonly ton: TonService,
     private readonly autoTrade: AutoTradeService,
     private readonly redis: RedisService,
     private readonly marketStats: MarketStatsService,
@@ -55,6 +53,13 @@ export class TelegramService
         'TELEGRAM_BOT_TOKEN пуст — Telegram выключен (проверьте .env / env в Docker)',
       );
       return;
+    }
+
+    const adminIds = this.config.get<string[]>('adminTelegramIds') ?? [];
+    if (adminIds.length === 0) {
+      this.logger.warn(
+        'ADMIN_TELEGRAM_IDS пуст — команды бота не обрабатываются (ни для кого)',
+      );
     }
 
     if (this.bot) {
@@ -92,7 +97,7 @@ export class TelegramService
     });
 
     const statsHandler = async (ctx: Context) => {
-      if (!(await this.requireAccess(ctx))) return;
+      if (!this.isTelegramAdmin(ctx)) return;
       const text = await this.simulation.buildTelegramTradingReport();
       await ctx.reply(
         text.length > MAX_MSG ? text.slice(0, MAX_MSG) + '…' : text,
@@ -101,6 +106,7 @@ export class TelegramService
     };
 
     this.bot.command('start', async (ctx) => {
+      if (!this.isTelegramAdmin(ctx)) return;
       await this.upsertUser(ctx);
       await ctx.reply(
         [
@@ -114,6 +120,7 @@ export class TelegramService
     });
 
     this.bot.command('menu', async (ctx) => {
+      if (!this.isTelegramAdmin(ctx)) return;
       await ctx.reply('Меню:', {
         reply_markup: await this.mainKeyboardForUser(ctx),
       });
@@ -133,7 +140,7 @@ export class TelegramService
       .use(statsHandler);
 
     this.bot.command('market', async (ctx) => {
-      if (!(await this.requireAccess(ctx))) return;
+      if (!this.isTelegramAdmin(ctx)) return;
       const arg = ctx.message?.text?.trim().split(/\s+/)[1];
       const report = await this.marketStats.getReport(arg);
       if (!report) {
@@ -151,7 +158,7 @@ export class TelegramService
     });
 
     this.bot.command('trades_export', async (ctx) => {
-      if (!(await this.requireAdmin(ctx))) return;
+      if (!this.isTelegramAdmin(ctx)) return;
       const parts = ctx.message?.text?.trim().split(/\s+/);
       let maxRows = 5000;
       if (parts?.[1] && /^\d+$/.test(parts[1])) {
@@ -171,7 +178,7 @@ export class TelegramService
     });
 
     this.bot.hears(BTN_AUTO_ON, async (ctx) => {
-      if (!(await this.requireAdmin(ctx))) return;
+      if (!this.isTelegramAdmin(ctx)) return;
       const chatId = String(ctx.chat?.id ?? ctx.from?.id ?? '');
       await this.autoTrade.setEnabled(true, chatId);
       await ctx.reply('Автоторговля включена.', {
@@ -180,7 +187,7 @@ export class TelegramService
     });
 
     this.bot.hears(BTN_AUTO_OFF, async (ctx) => {
-      if (!(await this.requireAdmin(ctx))) return;
+      if (!this.isTelegramAdmin(ctx)) return;
       await this.autoTrade.setEnabled(false);
       await ctx.reply('Автоторговля выключена.', {
         reply_markup: await this.mainKeyboardForUser(ctx),
@@ -188,7 +195,7 @@ export class TelegramService
     });
 
     this.bot.command('autotrade', async (ctx) => {
-      if (!(await this.requireAdmin(ctx))) return;
+      if (!this.isTelegramAdmin(ctx)) return;
       const arg = ctx.message?.text?.trim().split(/\s+/)[1]?.toLowerCase();
 
       if (!arg || arg === 'status') {
@@ -285,12 +292,7 @@ export class TelegramService
 
   /** Клавиатура: статистика; для админа — одна кнопка вкл/выкл авто. */
   private async mainKeyboardForUser(ctx: Context): Promise<Keyboard> {
-    const uid = ctx.from?.id;
-    const admins = this.config.get<string[]>('adminTelegramIds') ?? [];
-    const isAdmin =
-      uid != null && admins.length > 0 && admins.includes(String(uid));
-
-    if (!isAdmin) {
+    if (!this.isTelegramAdmin(ctx)) {
       return new Keyboard().text(BTN_STATS).resized().persistent();
     }
 
@@ -350,33 +352,10 @@ export class TelegramService
     });
   }
 
-  private async requireAdmin(ctx: Context): Promise<boolean> {
+  /** Команды и клавиатура только для ID из ADMIN_TELEGRAM_IDS (без ответа чужим). */
+  private isTelegramAdmin(ctx: Context): boolean {
+    const uid = ctx.from?.id;
     const admins = this.config.get<string[]>('adminTelegramIds') ?? [];
-    if (admins.length === 0) {
-      await ctx.reply('Задайте ADMIN_TELEGRAM_IDS в .env.');
-      return false;
-    }
-    const id = ctx.from?.id;
-    if (id == null || !admins.includes(String(id))) {
-      await ctx.reply('Нужны права администратора.');
-      return false;
-    }
-    return true;
-  }
-
-  private async requireAccess(ctx: Context): Promise<boolean> {
-    if (!this.ton.isAccessRequired()) return true;
-    const id = ctx.from?.id;
-    if (id == null) return false;
-    const admins = this.config.get<string[]>('adminTelegramIds') ?? [];
-    if (admins.includes(String(id))) return true;
-    const u = await this.prisma.telegramUser.findUnique({
-      where: { telegramId: String(id) },
-    });
-    if (u?.accessPaid) return true;
-    await ctx.reply(
-      'Нужен доступ. Обратитесь к администратору или настройте TON в проекте.',
-    );
-    return false;
+    return uid != null && admins.length > 0 && admins.includes(String(uid));
   }
 }

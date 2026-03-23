@@ -4,7 +4,6 @@ import { AutoTradeModule } from '../autotrade/auto-trade.module';
 import { MarketModule } from '../market/market.module';
 import { OrderModule } from '../order/order.module';
 import { StrategyModule } from '../strategy/strategy.module';
-import { TonModule } from '../ton/ton.module';
 import { SpreadMonitorService } from './spread-monitor.service';
 import { TelegramService } from './telegram.service';
 
@@ -13,7 +12,6 @@ import { TelegramService } from './telegram.service';
     ConfigModule,
     StrategyModule,
     OrderModule,
-    TonModule,
     AutoTradeModule,
     MarketModule,
   ],
