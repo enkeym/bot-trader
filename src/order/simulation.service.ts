@@ -5,6 +5,7 @@ import { createHash } from 'crypto';
 import {
   BinanceSpotService,
   SpotMarketOrderResult,
+  SpotTicker24hrResult,
 } from '../binance/binance-spot.service';
 import {
   applyBuyFill,
@@ -26,6 +27,23 @@ import { OrderIntentService } from './order-intent.service';
 import { RiskService } from '../risk/risk.service';
 import { SpreadService } from '../strategy/spread.service';
 import { parseSpotExchangeFill } from './balance-telegram.format';
+import {
+  buildTelegramStatsHistoryBlocks,
+  fmtAutotradeIntervalRu,
+  fmtDurationShort,
+  fmtStatsDateTime,
+  fmtStatsNumber,
+  fmtStatsQtyBase,
+  fmtUptimeProcess,
+  fmtVolumeShort,
+  pctArrow,
+  TelegramStatsHistoryRow,
+  telegramStatsBoxBlank,
+  telegramStatsBoxBottom,
+  telegramStatsBoxTop,
+  telegramStatsInnerHr,
+  telegramStatsLine,
+} from './telegram-trading-report.format';
 
 /** Поля в payload OrderIntent для бумажной статистики */
 export type SimPayload = {
@@ -1352,14 +1370,14 @@ export class SimulationService {
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
     const rtAccumulate =
       this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
+    const emPctRt =
+      this.config.get<number>('binance.roundtripEmergencyDrawdownPercent') ?? 0;
+    const intervalMs =
+      this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
     const fiat = this.config.get<string>('market.fiat') ?? 'USD';
     const asset = this.config.get<string>('market.asset') ?? 'USDT';
     const equityBaseline =
       this.config.get<number | null>('stats.equityBaselineQuote') ?? null;
-
-    const st = await this.prisma.botState.findUnique({
-      where: { id: 'default' },
-    });
 
     const fmtQ = (n: number, fd = 4) =>
       n.toLocaleString('ru-RU', {
@@ -1367,190 +1385,489 @@ export class SimulationService {
         maximumFractionDigits: fd,
       });
 
-    const lines: string[] = ['📊 Сводка', ''];
+    const tick24: SpotTicker24hrResult =
+      await this.binanceSpot.getTicker24hr(symbol);
+    const spotAscRows = await this.loadSpotExecutedAsc();
+    const st = await this.prisma.botState.findUnique({
+      where: { id: 'default' },
+    });
 
-    if (dryRun) {
-      const dash = await this.getPaperDashboard();
-      lines.push('🧪 Бумажный режим (без Spot).');
-      lines.push(
-        `💼 Вирт. кошелёк: ${fmtQ(dash.currentPaperWalletUsdt)} USDT (старт ${fmtQ(dash.startingPaperWalletUsdt)})`,
+    const markPrice = tick24.ok ? tick24.lastPrice : NaN;
+
+    const balLive =
+      !dryRun && hasKeys ? await this.binanceSpot.getAccountBalances() : null;
+
+    const tracked = st?.spotTrackedBtc != null ? Number(st.spotTrackedBtc) : 0;
+    const avgE = st?.spotAvgEntryUsdt != null ? Number(st.spotAvgEntryUsdt) : 0;
+    const peak =
+      st?.spotRoundtripPeakMarkUsdt != null
+        ? Number(st.spotRoundtripPeakMarkUsdt)
+        : 0;
+
+    const out: string[] = [];
+
+    const dashPaper = dryRun ? await this.getPaperDashboard() : null;
+
+    if (dryRun && dashPaper) {
+      const dash = dashPaper;
+      const diff = dash.currentPaperWalletUsdt - dash.startingPaperWalletUsdt;
+      const pct =
+        dash.startingPaperWalletUsdt > 0
+          ? (diff / dash.startingPaperWalletUsdt) * 100
+          : 0;
+      out.push(telegramStatsBoxTop('🧪 БУМАЖНЫЙ РЕЖИМ'));
+      out.push(telegramStatsBoxBlank());
+      out.push(
+        telegramStatsLine(
+          `💼 Вирт. баланс: ${fmtQ(dash.currentPaperWalletUsdt)} USDT`,
+        ),
       );
-      lines.push(
-        `📋 Тест-сделок в БД: ${dash.totalSimulatedTrades}; сумма оценок: ${fmtQ(dash.totalEstimatedPnLUsdt)} USDT`,
+      out.push(telegramStatsInnerHr());
+      out.push(
+        telegramStatsLine(
+          `🏁 Старт: ${fmtQ(dash.startingPaperWalletUsdt)} USDT`,
+        ),
       );
+      out.push(
+        telegramStatsLine(
+          `${diff >= 0 ? '🟢' : '🔴'} Оценка P2P: ${diff >= 0 ? '+' : ''}${fmtQ(diff)} USDT (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `📋 Тест-сделок: ${dash.totalSimulatedTrades} · сумма оценок: ${fmtQ(dash.totalEstimatedPnLUsdt)} USDT`,
+        ),
+      );
+      out.push(telegramStatsBoxBottom());
     } else if (!hasKeys) {
-      lines.push('⚠️ Ключи API не заданы — баланс биржи недоступен.');
-    } else {
-      const aggSpot = await this.aggregateSpotExecStats();
-      const tickSym = await this.binanceSpot.getTickerPrice(symbol);
-      const markPrice = tickSym.ok ? tickSym.price : NaN;
-      const bal = await this.binanceSpot.getAccountBalances();
-      let baseFreeForRoundtrip = '—';
-      if (!bal.ok) {
-        lines.push(`⚠️ Баланс: ${bal.error}`);
-        if (Number.isFinite(markPrice) && markPrice > 0) {
-          lines.push(
-            `📈 ${symbol}: ~${fmtQ(markPrice, 2)} ${quoteAsset} за 1 ${baseAsset}`,
-          );
-        }
+      out.push(telegramStatsBoxTop('💲 БАЛАНС'));
+      out.push(telegramStatsBoxBlank());
+      out.push(
+        telegramStatsLine('⚠️ Ключи API не заданы — баланс биржи недоступен.'),
+      );
+      out.push(telegramStatsBoxBottom());
+    } else if (balLive && !balLive.ok) {
+      out.push(telegramStatsBoxTop('💲 БАЛАНС'));
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine(`⚠️ ${balLive.error}`));
+      out.push(telegramStatsBoxBottom());
+    } else if (balLive?.ok) {
+      const qRow = balLive.balances.find((b) => b.asset === quoteAsset);
+      const bRow = balLive.balances.find((b) => b.asset === baseAsset);
+      const uf = qRow ? parseFloat(qRow.free) : 0;
+      const ul = qRow ? parseFloat(qRow.locked) : 0;
+      const bf = bRow ? parseFloat(bRow.free) : 0;
+      const bl = bRow ? parseFloat(bRow.locked) : 0;
+      const quoteTot = uf + ul;
+      const baseTot = bf + bl;
+      const equity =
+        Number.isFinite(markPrice) && markPrice > 0
+          ? quoteTot + baseTot * markPrice
+          : NaN;
+      const baseInQuote =
+        Number.isFinite(markPrice) && markPrice > 0 ? baseTot * markPrice : NaN;
+
+      out.push(telegramStatsBoxTop('💲 БАЛАНС'));
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine(`💵 ${quoteAsset}:    ${fmtQ(quoteTot)}`));
+      if (Number.isFinite(baseInQuote)) {
+        out.push(
+          telegramStatsLine(
+            `🪙 ${baseAsset}:     ${fmtStatsQtyBase(baseTot)} (~${fmtQ(baseInQuote)} ${quoteAsset})`,
+          ),
+        );
       } else {
-        const qRow = bal.balances.find((b) => b.asset === quoteAsset);
-        const bRow = bal.balances.find((b) => b.asset === baseAsset);
-        const uf = qRow ? parseFloat(qRow.free) : 0;
-        const ul = qRow ? parseFloat(qRow.locked) : 0;
-        const bf = bRow ? parseFloat(bRow.free) : 0;
-        const bl = bRow ? parseFloat(bRow.locked) : 0;
-        const quoteTot = uf + ul;
-        const baseTot = bf + bl;
-
-        const equity =
-          Number.isFinite(markPrice) && markPrice > 0
-            ? quoteTot + baseTot * markPrice
-            : NaN;
-
-        if (Number.isFinite(markPrice) && markPrice > 0) {
-          lines.push(
-            `📈 Курс ${symbol}: ~${fmtQ(markPrice, 2)} ${quoteAsset} / 1 ${baseAsset}`,
-          );
-        }
-        lines.push(
-          `💵 ${quoteAsset}: ${fmtQ(quoteTot)} · ${baseAsset}: ${fmtQ(baseTot, 8)} (св. ${fmtQ(uf)} / ${fmtQ(bf, 8)})`,
+        out.push(
+          telegramStatsLine(`🪙 ${baseAsset}:     ${fmtStatsQtyBase(baseTot)}`),
+        );
+      }
+      out.push(telegramStatsInnerHr());
+      if (Number.isFinite(equity)) {
+        out.push(
+          telegramStatsLine(`💼 Портфель: ${fmtQ(equity)} ${quoteAsset}`),
+        );
+      } else {
+        out.push(telegramStatsLine('💼 Портфель: —'));
+      }
+      out.push(telegramStatsBoxBlank());
+      if (equityBaseline != null && equityBaseline > 0) {
+        out.push(
+          telegramStatsLine(`🏁 Стартовый депозит: ${fmtQ(equityBaseline)}`),
         );
         if (Number.isFinite(equity)) {
-          lines.push(`💰 Оценка ~${fmtQ(equity)} ${quoteAsset}`);
-          if (equityBaseline != null && equityBaseline > 0) {
-            const diff = equity - equityBaseline;
-            const pct = (diff / equityBaseline) * 100;
-            lines.push(
-              `${this.arrowForPnl(diff)} Старт ${fmtQ(equityBaseline)} → ${diff >= 0 ? '+' : ''}${fmtQ(diff)} ${quoteAsset} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`,
-            );
-          }
-        } else {
-          lines.push('📍 Марк недоступен — оценку счёта не посчитать.');
+          const diff = equity - equityBaseline;
+          const p = (diff / equityBaseline) * 100;
+          out.push(
+            telegramStatsLine(
+              `${diff >= 0 ? '🟢' : '🔴'} Прибыль: ${diff >= 0 ? '+' : ''}${fmtQ(diff)} ${quoteAsset} (${p >= 0 ? '+' : ''}${p.toFixed(2)}%)`,
+            ),
+          );
         }
-        baseFreeForRoundtrip = fmtQ(bf, 8);
       }
-      lines.push('');
-
-      const tracked =
-        st?.spotTrackedBtc != null ? Number(st.spotTrackedBtc) : 0;
-      const avgE =
-        st?.spotAvgEntryUsdt != null ? Number(st.spotAvgEntryUsdt) : 0;
-
-      if (spotStrategy === 'roundtrip') {
-        const emPctRt =
-          this.config.get<number>(
-            'binance.roundtripEmergencyDrawdownPercent',
-          ) ?? 0;
-        const peak =
-          st?.spotRoundtripPeakMarkUsdt != null
-            ? Number(st.spotRoundtripPeakMarkUsdt)
-            : 0;
-
-        const m = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : NaN;
-        if (tracked > 0 && avgE > 0) {
-          const tpTh = avgE * (1 + effectiveTpPct / 100);
-          const unreal = Number.isFinite(m) ? tracked * (m - avgE) : NaN;
-          const unrealPct = Number.isFinite(m)
-            ? ((m - avgE) / avgE) * 100
-            : NaN;
-          lines.push(
-            `🎯 К продаже (бот): ${tracked.toFixed(8)} ${baseAsset} · купили ~${fmtQ(avgE, 2)} ${quoteAsset} → продаём от ~${fmtQ(tpTh, 2)} (тейк +${effectiveTpPct}%)`,
-          );
-          if (slPct > 0) {
-            const slTh = avgE * (1 - slPct / 100);
-            lines.push(
-              `🛡 Стоп при ≤ ${fmtQ(slTh, 2)} · докупка до ${maxQuote} ${quoteAsset}`,
-            );
-          } else {
-            lines.push(`📎 Докупка до ${maxQuote} ${quoteAsset}`);
-          }
-          if (Number.isFinite(unreal) && Number.isFinite(m)) {
-            lines.push(
-              `${this.arrowForPnl(unreal)} Нереализ.: ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} ${quoteAsset} (${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%) · марк ~${fmtQ(m, 2)}`,
-            );
-          }
-          if (emPctRt > 0 && peak > 0) {
-            lines.push(`⚡ Аварийно: −${emPctRt}% от пика ~${fmtQ(peak, 2)}`);
-          }
-          if (maxPosRoundtrip > 0) {
-            lines.push(`📊 Лимит поз. ~${maxPosRoundtrip} ${quoteAsset}`);
-          }
-          if (rtAccumulate) {
-            lines.push('➕ Докупки по сигналу включены');
-          }
-        } else {
-          const mk = Number.isFinite(m)
-            ? ` · марк ~${fmtQ(m, 2)} ${quoteAsset}`
-            : '';
-          lines.push(
-            `🎯 Нет позиции бота · своб. ${baseAsset}: ${baseFreeForRoundtrip}${mk}`,
-          );
-        }
-        lines.push('');
-      } else {
-        lines.push(`⚙️ ${spotSide} · до ${maxQuote} ${quoteAsset}/ордер`);
-        lines.push('');
-      }
-
-      const [lastBuy, lastSell] = await Promise.all([
-        this.getLastExecutedSpotBuy(),
-        this.getLastExecutedSpotSell(),
-      ]);
-      if (lastBuy || lastSell) {
-        lines.push('🕐 Последние сделки');
-        if (lastBuy) {
-          const t = lastBuy.createdAt
-            .toISOString()
-            .slice(0, 16)
-            .replace('T', ' ');
-          lines.push(
-            `📥 ${t} · ${lastBuy.baseQty.toFixed(8)} ${baseAsset} @~${fmtQ(lastBuy.avgPrice, 2)} · −${fmtQ(lastBuy.quoteQty)} ${quoteAsset}`,
-          );
-        }
-        if (lastSell) {
-          const t = lastSell.createdAt
-            .toISOString()
-            .slice(0, 16)
-            .replace('T', ' ');
-          const tag =
-            lastSell.exitKind === 'stop_loss'
-              ? '🛡стоп'
-              : lastSell.exitKind === 'emergency_drawdown'
-                ? '⚡авария'
-                : lastSell.exitKind === 'take_profit'
-                  ? '🎯тейк'
-                  : '💸';
-          const rtp = lastSell.realizedPnlUsdt;
-          const pnlStr =
-            rtp != null && Number.isFinite(rtp)
-              ? `${rtp >= 0 ? '+' : ''}${fmtQ(rtp)} ${quoteAsset}`
-              : '—';
-          lines.push(
-            `${this.arrowForPnl(rtp ?? null)} ${t} · продал ${lastSell.baseQty.toFixed(8)} ${baseAsset} @~${fmtQ(lastSell.avgPrice, 2)} · ${fmtQ(lastSell.quoteQty)} ${quoteAsset} · ${tag} · ${pnlStr}`,
-          );
-        }
-        if (spotStrategy === 'roundtrip' && tracked > 0 && avgE > 0) {
-          const tpTh = avgE * (1 + effectiveTpPct / 100);
-          lines.push(`⏳ Тейк при марке ≥ ${fmtQ(tpTh, 2)} ${quoteAsset}`);
-        }
-        lines.push('');
-      }
-      lines.push(`🔗 P2P: ${asset}/${fiat}`);
-      lines.push('');
-      const spotLine = `📑 Spot: ${aggSpot.buyCount}↑ ${fmtQ(aggSpot.buyUsdt)} ${quoteAsset} · ${aggSpot.sellCount}↓ ${fmtQ(aggSpot.sellUsdt)} ${quoteAsset}`;
-      if (aggSpot.sellCount > 0) {
-        const p = aggSpot.profitFromSellsUsdt;
-        lines.push(
-          `${this.arrowForPnl(p)} Реализ.: ${p >= 0 ? '+' : ''}${fmtQ(p)} ${quoteAsset} · ${spotLine}`,
+      if (
+        Number.isFinite(equity) &&
+        equity > 0 &&
+        Number.isFinite(baseInQuote)
+      ) {
+        const share = (baseInQuote / equity) * 100;
+        out.push(
+          telegramStatsLine(
+            `📊 Доля ${baseAsset}: ${fmtStatsNumber(share, 1, 1)}% от портфеля`,
+          ),
         );
-      } else {
-        lines.push(spotLine);
       }
+      out.push(telegramStatsBoxBottom());
     }
 
-    lines.push('');
-    lines.push('📜 Последние операции:');
+    out.push('');
+    out.push(telegramStatsBoxTop('📡 РЫНОК'));
+    out.push(telegramStatsBoxBlank());
+    if (tick24.ok) {
+      const ch = tick24.priceChangePercent;
+      out.push(
+        telegramStatsLine(
+          `🔸 ${baseAsset}/${quoteAsset}:    ${fmtQ(tick24.lastPrice, 2)}`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `🔹 Изм. 24ч:    ${ch >= 0 ? '+' : ''}${fmtStatsNumber(ch, 2, 2)}% ${pctArrow(ch)}`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(`📉 Мин. 24ч:    ${fmtQ(tick24.lowPrice, 2)}`),
+      );
+      out.push(
+        telegramStatsLine(`📈 Макс. 24ч:   ${fmtQ(tick24.highPrice, 2)}`),
+      );
+      out.push(
+        telegramStatsLine(
+          `📊 Объём 24ч:   ${fmtVolumeShort(tick24.volume, baseAsset)}`,
+        ),
+      );
+    } else {
+      out.push(telegramStatsLine(`⚠️ Тикер 24ч: ${tick24.error}`));
+      if (Number.isFinite(markPrice) && markPrice > 0) {
+        out.push(
+          telegramStatsLine(
+            `🔸 ${baseAsset}/${quoteAsset}:    ${fmtQ(markPrice, 2)}`,
+          ),
+        );
+      }
+    }
+    out.push(telegramStatsBoxBlank());
+    out.push(telegramStatsLine(`🔗 P2P курс:    ${asset}/${fiat}`));
+    out.push(
+      telegramStatsLine(`🕐 Обновлено:   ${fmtStatsDateTime(new Date())}`),
+    );
+    out.push(telegramStatsBoxBottom());
+    out.push('');
+
+    out.push(telegramStatsBoxTop('🎯 АКТИВНАЯ ПОЗИЦИЯ'));
+    out.push(telegramStatsBoxBlank());
+    if (dryRun) {
+      out.push(
+        telegramStatsLine(
+          '🧪 Spot не исполняется — только записи SIMULATED в БД.',
+        ),
+      );
+      if (spotStrategy === 'roundtrip' && tracked > 0 && avgE > 0) {
+        const m = Number.isFinite(markPrice) ? markPrice : NaN;
+        const tpTh = avgE * (1 + effectiveTpPct / 100);
+        out.push(
+          telegramStatsLine(
+            `📌 Учёт roundtrip: ${fmtStatsQtyBase(tracked)} ${baseAsset} @ ~${fmtQ(avgE, 2)} · тейк ≥ ${fmtQ(tpTh, 2)}`,
+          ),
+        );
+        if (Number.isFinite(m)) {
+          const unreal = tracked * (m - avgE);
+          out.push(
+            telegramStatsLine(
+              `💹 Нереализ.: ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} ${quoteAsset}`,
+            ),
+          );
+        }
+      } else {
+        out.push(telegramStatsLine('— нет учётной позиции бота —'));
+      }
+    } else if (!hasKeys || !balLive?.ok) {
+      out.push(
+        telegramStatsLine(
+          '— нет доступа к балансу API — позицию на бирже не сверяем —',
+        ),
+      );
+    } else if (spotStrategy === 'roundtrip') {
+      const m = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : NaN;
+      const bRow = balLive.balances.find((b) => b.asset === baseAsset);
+      const qRow = balLive.balances.find((b) => b.asset === quoteAsset);
+      const baseFreeForRoundtrip = bRow ? parseFloat(bRow.free) : 0;
+      const quoteTot =
+        (qRow ? parseFloat(qRow.free) + parseFloat(qRow.locked) : 0) || 0;
+      const baseTot =
+        (bRow ? parseFloat(bRow.free) + parseFloat(bRow.locked) : 0) || 0;
+      let equityForPct = NaN;
+      if (Number.isFinite(m) && m > 0) {
+        equityForPct = quoteTot + baseTot * m;
+      }
+      if (tracked > 0 && avgE > 0) {
+        const tpTh = avgE * (1 + effectiveTpPct / 100);
+        const slTh = slPct > 0 ? avgE * (1 - slPct / 100) : NaN;
+        const invested = tracked * avgE;
+        const unreal = Number.isFinite(m) ? tracked * (m - avgE) : NaN;
+        const unrealPct = Number.isFinite(m) ? ((m - avgE) / avgE) * 100 : NaN;
+        const posPct =
+          Number.isFinite(equityForPct) && equityForPct > 0
+            ? (invested / equityForPct) * 100
+            : NaN;
+        out.push(
+          telegramStatsLine(
+            `📥 Вход:      ${fmtStatsQtyBase(tracked)} ${baseAsset} @ ${fmtQ(avgE, 2)}`,
+          ),
+        );
+        out.push(
+          telegramStatsLine(`💰 Вложено:   ${fmtQ(invested)} ${quoteAsset}`),
+        );
+        if (Number.isFinite(posPct)) {
+          out.push(
+            telegramStatsLine(
+              `📏 Размер:    ~${fmtStatsNumber(posPct, 1, 2)}% от портфеля`,
+            ),
+          );
+        }
+        out.push(telegramStatsBoxBlank());
+        out.push(telegramStatsLine('── Цели ──────────────────'));
+        out.push(
+          telegramStatsLine(
+            `🟢 Тейк:      ≥ ${fmtQ(tpTh, 2)} (+${effectiveTpPct}%)`,
+          ),
+        );
+        if (slPct > 0 && Number.isFinite(slTh)) {
+          out.push(
+            telegramStatsLine(`🔴 Стоп:      ≤ ${fmtQ(slTh, 2)} (−${slPct}%)`),
+          );
+        } else {
+          out.push(telegramStatsLine('🔴 Стоп:      — (выкл.)'));
+        }
+        out.push(
+          telegramStatsLine(`🔵 Докупка:   до ${maxQuote} ${quoteAsset}`),
+        );
+        out.push(
+          telegramStatsLine(
+            maxPosRoundtrip > 0
+              ? `📦 Лимит поз.: ~${maxPosRoundtrip} ${quoteAsset}`
+              : `📦 Лимит поз.: —`,
+          ),
+        );
+        if (rtAccumulate) {
+          out.push(telegramStatsLine('➕ Докупки по сигналу: включены'));
+        }
+        out.push(telegramStatsBoxBlank());
+        out.push(telegramStatsLine('── Текущее состояние ─────'));
+        if (Number.isFinite(unreal) && Number.isFinite(unrealPct)) {
+          out.push(
+            telegramStatsLine(
+              `💹 Нереализ.:  ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} ${quoteAsset} (${unrealPct >= 0 ? '+' : ''}${fmtStatsNumber(unrealPct, 2, 2)}%)`,
+            ),
+          );
+        }
+        const toTpPct =
+          Number.isFinite(m) && m > 0 ? ((tpTh - m) / m) * 100 : Number.NaN;
+        const distTpUsdt =
+          Number.isFinite(m) && m > 0 ? tracked * Math.max(0, tpTh - m) : NaN;
+        if (Number.isFinite(distTpUsdt) && Number.isFinite(toTpPct)) {
+          out.push(
+            telegramStatsLine(
+              `📍 До тейка:   ${fmtQ(distTpUsdt)} ${quoteAsset} (${toTpPct >= 0 ? '+' : ''}${fmtStatsNumber(toTpPct, 2, 2)}%)`,
+            ),
+          );
+        }
+        if (slPct > 0 && Number.isFinite(m) && m > 0 && Number.isFinite(slTh)) {
+          const toSlPct = ((m - slTh) / m) * 100;
+          const distSlUsdt = tracked * Math.max(0, m - slTh);
+          out.push(
+            telegramStatsLine(
+              `📍 До стопа:   ${fmtQ(distSlUsdt)} ${quoteAsset} (−${fmtStatsNumber(toSlPct, 2, 2)}%)`,
+            ),
+          );
+        }
+        if (emPctRt > 0 && peak > 0) {
+          out.push(
+            telegramStatsLine(
+              `⚡ Авар. сброс: −${emPctRt}% от пика ${fmtQ(peak, 2)}`,
+            ),
+          );
+        }
+        out.push(telegramStatsBoxBlank());
+        let status = '⏳ Статус: ожидание...';
+        if (Number.isFinite(m) && m > 0) {
+          if (m >= tpTh) status = '⏳ Статус: в зоне тейка';
+          else if (slPct > 0 && Number.isFinite(slTh) && m <= slTh) {
+            status = '⏳ Статус: зона стопа';
+          } else {
+            status = '⏳ Статус: ожидание тейка...';
+          }
+        }
+        out.push(telegramStatsLine(status));
+      } else {
+        const mk = Number.isFinite(m)
+          ? `марк ~${fmtQ(m, 2)} ${quoteAsset}`
+          : 'марк —';
+        out.push(
+          telegramStatsLine(
+            `📍 Нет позиции бота · своб. ${baseAsset}: ${fmtStatsQtyBase(baseFreeForRoundtrip)} · ${mk}`,
+          ),
+        );
+      }
+    } else {
+      out.push(
+        telegramStatsLine(
+          `⚙️ Стратегия: ${spotSide} · до ${maxQuote} ${quoteAsset}/ордер (без roundtrip)`,
+        ),
+      );
+    }
+    out.push(telegramStatsBoxBottom());
+    out.push('');
+
+    if (dryRun && dashPaper) {
+      const dash = dashPaper;
+      out.push(telegramStatsBoxTop('📈 ТОРГОВАЯ СТАТИСТИКА'));
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine('── Бумага (SIMULATED) ────'));
+      out.push(
+        telegramStatsLine(`🔄 Всего записей:   ${dash.totalSimulatedTrades}`),
+      );
+      out.push(
+        telegramStatsLine(
+          `💎 Сумма оценок:    ${dash.totalEstimatedPnLUsdt >= 0 ? '+' : ''}${fmtQ(dash.totalEstimatedPnLUsdt)} USDT`,
+        ),
+      );
+      out.push(telegramStatsBoxBottom());
+    } else {
+      const detail = this.computeSpotTradeAnalyticsFromRows(spotAscRows);
+      const agg = detail.agg;
+      const unrealRt =
+        spotStrategy === 'roundtrip' &&
+        tracked > 0 &&
+        avgE > 0 &&
+        Number.isFinite(markPrice)
+          ? tracked * (markPrice - avgE)
+          : 0;
+      const totalPnl = agg.profitFromSellsUsdt + unrealRt;
+      const denom = detail.streakDenom;
+      const winRate = denom > 0 ? (detail.winningSells / denom) * 100 : 0;
+      const lossRate = denom > 0 ? (detail.losingSells / denom) * 100 : 0;
+      const avgSellPnl =
+        agg.sellCount > 0 ? agg.profitFromSellsUsdt / agg.sellCount : null;
+
+      out.push(telegramStatsBoxTop('📈 ТОРГОВАЯ СТАТИСТИКА'));
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine('── Общее ─────────────────'));
+      out.push(
+        telegramStatsLine(`🔄 Всего сделок:   ${agg.buyCount + agg.sellCount}`),
+      );
+      out.push(
+        telegramStatsLine(
+          `📥 Покупок:         ${agg.buyCount} (${fmtQ(agg.buyUsdt)} ${quoteAsset})`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `📤 Продаж:          ${agg.sellCount} (${fmtQ(agg.sellUsdt)} ${quoteAsset})`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `✅ Прибыльных:      ${detail.winningSells} (${fmtStatsNumber(winRate, 0, 0)}%)`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `❌ Убыточных:       ${detail.losingSells} (${fmtStatsNumber(lossRate, 0, 0)}%)`,
+        ),
+      );
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine('── Прибыль ───────────────'));
+      out.push(
+        telegramStatsLine(
+          `💰 Реализовано:    ${agg.profitFromSellsUsdt >= 0 ? '+' : ''}${fmtQ(agg.profitFromSellsUsdt)} ${quoteAsset}`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `📊 Нереализовано:  ${unrealRt >= 0 ? '+' : ''}${fmtQ(unrealRt)} ${quoteAsset}`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `💎 Общий P&L:     ${totalPnl >= 0 ? '+' : ''}${fmtQ(totalPnl)} ${quoteAsset}`,
+        ),
+      );
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine('── Средние ───────────────'));
+      out.push(
+        telegramStatsLine(
+          detail.avgBuyPrice != null
+            ? `📏 Ср. покупка:    ${fmtQ(detail.avgBuyPrice, 2)} ${quoteAsset}/${baseAsset}`
+            : `📏 Ср. покупка:    —`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          detail.avgSellPrice != null
+            ? `📏 Ср. продажа:   ${fmtQ(detail.avgSellPrice, 2)} ${quoteAsset}/${baseAsset}`
+            : `📏 Ср. продажа:   —`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          avgSellPnl != null && Number.isFinite(avgSellPnl)
+            ? `📏 Ср. прибыль:   ${avgSellPnl >= 0 ? '+' : ''}${fmtQ(avgSellPnl)} ${quoteAsset}`
+            : `📏 Ср. прибыль:   —`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          detail.avgHoldMs != null
+            ? `⏱ Ср. время сделки: ${fmtDurationShort(detail.avgHoldMs)}`
+            : `⏱ Ср. время сделки: —`,
+        ),
+      );
+      out.push(telegramStatsBoxBlank());
+      out.push(telegramStatsLine('── Рекорды ───────────────'));
+      const bestStr =
+        detail.bestPnl != null
+          ? `${detail.bestPnl >= 0 ? '+' : ''}${fmtQ(detail.bestPnl)} ${quoteAsset}${detail.bestPct != null ? ` (${detail.bestPct >= 0 ? '+' : ''}${fmtStatsNumber(detail.bestPct, 2, 2)}%)` : ''}`
+          : '—';
+      out.push(telegramStatsLine(`🏆 Лучшая:  ${bestStr}`));
+      if (detail.losingSells === 0) {
+        out.push(telegramStatsLine('💀 Худшая:  — нет убыточных —'));
+      } else if (detail.worstPnl != null) {
+        const w = detail.worstPnl;
+        const wp =
+          detail.worstPct != null
+            ? ` (${w >= 0 ? '+' : ''}${fmtStatsNumber(detail.worstPct, 2, 2)}%)`
+            : '';
+        out.push(
+          telegramStatsLine(
+            `💀 Худшая:  ${w >= 0 ? '+' : ''}${fmtQ(w)} ${quoteAsset}${wp}`,
+          ),
+        );
+      } else {
+        out.push(telegramStatsLine('💀 Худшая:  —'));
+      }
+      const streakLine =
+        detail.streakCount > 0 && detail.streakKind === 'win'
+          ? `${detail.streakCount} 🟢 подряд`
+          : detail.streakCount > 0 && detail.streakKind === 'loss'
+            ? `${detail.streakCount} 🔴 подряд`
+            : '—';
+      out.push(telegramStatsLine(`📈 Серия:   ${streakLine}`));
+      out.push(telegramStatsBoxBottom());
+    }
+
+    out.push('');
+    out.push(telegramStatsBoxTop('📜 ИСТОРИЯ СДЕЛОК'));
+    out.push(telegramStatsBoxBlank());
 
     const recent = await this.prisma.orderIntent.findMany({
       orderBy: { createdAt: 'desc' },
@@ -1558,14 +1875,27 @@ export class SimulationService {
     });
 
     if (recent.length === 0) {
-      lines.push('— пока нет записей.');
+      out.push(telegramStatsLine('— пока нет записей.'));
     } else {
-      for (const r of recent) {
-        lines.push(this.formatOperationLine(r, baseAsset));
+      const histRows = this.ordersToTelegramHistoryRows(
+        recent,
+        spotAscRows,
+        baseAsset,
+      );
+      const histLines = buildTelegramStatsHistoryBlocks(histRows);
+      for (const line of histLines) {
+        out.push(line);
       }
     }
+    out.push(telegramStatsBoxBottom());
 
-    return lines.join('\n');
+    out.push('');
+    out.push(`⚙️ Бот работает: ${fmtUptimeProcess(process.uptime())}`);
+    out.push(
+      `🔄 Следующая проверка через ${fmtAutotradeIntervalRu(intervalMs)}`,
+    );
+
+    return out.join('\n');
   }
 
   /** Агрегат исполненных Spot-ордеров (для /stats и уведомлений). */
@@ -1648,6 +1978,257 @@ export class SimulationService {
       };
     }
     return null;
+  }
+
+  private async loadSpotExecutedAsc(): Promise<
+    Array<{ id: string; createdAt: Date; payload: unknown }>
+  > {
+    return this.prisma.orderIntent.findMany({
+      where: { provider: 'binance_spot', status: 'EXECUTED' },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, createdAt: true, payload: true },
+    });
+  }
+
+  private spotSellHoldMs(
+    allAsc: Array<{ createdAt: Date; payload: unknown }>,
+    sellIndex: number,
+  ): number | null {
+    for (let i = sellIndex - 1; i >= 0; i--) {
+      const p = allAsc[i].payload as SpotLivePayload | null;
+      if (p?.spot?.side !== 'BUY' || !p.exchangeResponse) continue;
+      const { baseQty } = parseSpotExchangeFill(p.exchangeResponse);
+      if (!Number.isFinite(baseQty) || baseQty <= 0) continue;
+      return (
+        allAsc[sellIndex].createdAt.getTime() - allAsc[i].createdAt.getTime()
+      );
+    }
+    return null;
+  }
+
+  private computeSpotTradeAnalyticsFromRows(
+    rows: Array<{ id: string; createdAt: Date; payload: unknown }>,
+  ): {
+    agg: {
+      buyCount: number;
+      sellCount: number;
+      buyUsdt: number;
+      sellUsdt: number;
+      profitFromSellsUsdt: number;
+    };
+    winningSells: number;
+    losingSells: number;
+    flatSells: number;
+    avgBuyPrice: number | null;
+    avgSellPrice: number | null;
+    avgHoldMs: number | null;
+    bestPnl: number | null;
+    bestPct: number | null;
+    worstPnl: number | null;
+    worstPct: number | null;
+    streakCount: number;
+    streakKind: 'win' | 'loss' | null;
+    streakDenom: number;
+  } {
+    let buyCount = 0;
+    let sellCount = 0;
+    let buyUsdt = 0;
+    let sellUsdt = 0;
+    let buyBase = 0;
+    let sellBase = 0;
+    let profitFromSellsUsdt = 0;
+    let winningSells = 0;
+    let losingSells = 0;
+    let flatSells = 0;
+    const holdMsList: number[] = [];
+    let lastBuyAt: Date | null = null;
+    const sellPnlSequence: (number | null)[] = [];
+
+    for (const r of rows) {
+      const p = r.payload as SpotLivePayload | null;
+      if (!p?.spot?.side || !p.exchangeResponse) continue;
+      const { baseQty, quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
+      if (!Number.isFinite(quoteQty) || !Number.isFinite(baseQty)) continue;
+      if (p.spot.side === 'BUY') {
+        buyCount++;
+        buyUsdt += quoteQty;
+        buyBase += baseQty;
+        lastBuyAt = r.createdAt;
+      } else if (p.spot.side === 'SELL') {
+        sellCount++;
+        sellUsdt += quoteQty;
+        sellBase += baseQty;
+        if (lastBuyAt) {
+          holdMsList.push(r.createdAt.getTime() - lastBuyAt.getTime());
+          lastBuyAt = null;
+        }
+        const rp = p.roundtrip?.realizedPnlUsdtEstimate;
+        if (rp != null && Number.isFinite(rp)) {
+          profitFromSellsUsdt += rp;
+          sellPnlSequence.push(rp);
+          if (rp > 0) winningSells++;
+          else if (rp < 0) losingSells++;
+          else flatSells++;
+        } else {
+          sellPnlSequence.push(null);
+          flatSells++;
+        }
+      }
+    }
+
+    let bestPnl: number | null = null;
+    let bestPct: number | null = null;
+    let worstPnl: number | null = null;
+    let worstPct: number | null = null;
+    for (const r of rows) {
+      const p = r.payload as SpotLivePayload | null;
+      if (p?.spot?.side !== 'SELL' || !p.exchangeResponse) continue;
+      const rp = p.roundtrip?.realizedPnlUsdtEstimate;
+      if (rp == null || !Number.isFinite(rp)) continue;
+      const { quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
+      const cost = quoteQty - rp;
+      const pct = cost > 0 ? (rp / cost) * 100 : Number.NaN;
+      if (bestPnl == null || rp > bestPnl) {
+        bestPnl = rp;
+        bestPct = Number.isFinite(pct) ? pct : null;
+      }
+      if (rp < 0 && (worstPnl == null || rp < worstPnl)) {
+        worstPnl = rp;
+        worstPct = Number.isFinite(pct) ? pct : null;
+      }
+    }
+
+    let streakCount = 0;
+    let streakKind: 'win' | 'loss' | null = null;
+    for (let i = sellPnlSequence.length - 1; i >= 0; i--) {
+      const pnl = sellPnlSequence[i];
+      if (pnl == null || !Number.isFinite(pnl)) break;
+      if (pnl === 0) break;
+      const w = pnl > 0;
+      if (streakKind == null) {
+        streakKind = w ? 'win' : 'loss';
+        streakCount = 1;
+      } else if (streakKind === 'win' && w) streakCount++;
+      else if (streakKind === 'loss' && !w) streakCount++;
+      else break;
+    }
+
+    const streakDenom = winningSells + losingSells;
+    const avgBuyPrice =
+      buyBase > 0 && Number.isFinite(buyUsdt / buyBase)
+        ? buyUsdt / buyBase
+        : null;
+    const avgSellPrice =
+      sellBase > 0 && Number.isFinite(sellUsdt / sellBase)
+        ? sellUsdt / sellBase
+        : null;
+    const avgHoldMs =
+      holdMsList.length > 0
+        ? holdMsList.reduce((a, b) => a + b, 0) / holdMsList.length
+        : null;
+
+    return {
+      agg: {
+        buyCount,
+        sellCount,
+        buyUsdt,
+        sellUsdt,
+        profitFromSellsUsdt,
+      },
+      winningSells,
+      losingSells,
+      flatSells,
+      avgBuyPrice,
+      avgSellPrice,
+      avgHoldMs,
+      bestPnl,
+      bestPct,
+      worstPnl,
+      worstPct,
+      streakCount,
+      streakKind,
+      streakDenom,
+    };
+  }
+
+  private ordersToTelegramHistoryRows(
+    recent: Array<{
+      id: string;
+      createdAt: Date;
+      provider: string;
+      side: string;
+      status: string;
+      payload: unknown;
+    }>,
+    spotAsc: Array<{ id: string; createdAt: Date; payload: unknown }>,
+    baseAsset: string,
+  ): TelegramStatsHistoryRow[] {
+    const idToIdx = new Map(spotAsc.map((r, i) => [r.id, i]));
+    const rows: TelegramStatsHistoryRow[] = [];
+    for (const r of recent) {
+      if (r.provider === 'binance_spot' && r.status === 'EXECUTED') {
+        const p = r.payload as SpotLivePayload | null;
+        const ex = p?.exchangeResponse;
+        const { baseQty, quoteQty } = parseSpotExchangeFill(ex);
+        const qa = p?.spot?.quoteAsset ?? 'USDT';
+        const sd = p?.spot?.side;
+        if (
+          sd === 'BUY' &&
+          Number.isFinite(quoteQty) &&
+          Number.isFinite(baseQty) &&
+          baseQty > 0
+        ) {
+          const avgPx = quoteQty / baseQty;
+          rows.push({
+            kind: 'spot_buy',
+            at: r.createdAt,
+            baseQty,
+            quoteQty,
+            avgPrice: avgPx,
+            baseAsset,
+            quoteAsset: qa,
+          });
+          continue;
+        }
+        if (
+          sd === 'SELL' &&
+          Number.isFinite(quoteQty) &&
+          Number.isFinite(baseQty) &&
+          baseQty > 0
+        ) {
+          const avgPx = quoteQty / baseQty;
+          const idx = idToIdx.get(r.id);
+          const holdMs = idx != null ? this.spotSellHoldMs(spotAsc, idx) : null;
+          rows.push({
+            kind: 'spot_sell',
+            at: r.createdAt,
+            baseQty,
+            quoteQty,
+            avgPrice: avgPx,
+            baseAsset,
+            quoteAsset: qa,
+            exitKind: p?.roundtrip?.exitKind,
+            realizedPnlUsdt: p?.roundtrip?.realizedPnlUsdtEstimate,
+            holdMs,
+          });
+          continue;
+        }
+      }
+      rows.push({
+        kind: 'other',
+        line: this.formatOperationLine(
+          {
+            createdAt: r.createdAt,
+            provider: r.provider,
+            side: r.side,
+            status: r.status,
+            payload: r.payload,
+          },
+          baseAsset,
+        ),
+      });
+    }
+    return rows;
   }
 
   private async aggregateSpotExecStats(): Promise<{

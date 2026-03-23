@@ -35,6 +35,18 @@ export type SpotMarketOrderResult =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; error: string; code?: number };
 
+/** Ответ GET /api/v3/ticker/24hr (публичный). */
+export type SpotTicker24hrResult =
+  | {
+      ok: true;
+      lastPrice: number;
+      priceChangePercent: number;
+      highPrice: number;
+      lowPrice: number;
+      volume: number;
+    }
+  | { ok: false; error: string };
+
 @Injectable()
 export class BinanceSpotService {
   private readonly log = new Logger(BinanceSpotService.name);
@@ -278,6 +290,64 @@ export class BinanceSpotService {
         const n = p != null ? parseFloat(String(p)) : NaN;
         if (Number.isFinite(n) && n > 0) {
           return { ok: true, price: n };
+        }
+      }
+      const err = res.data as { msg?: string };
+      return {
+        ok: false,
+        error: err?.msg ?? `HTTP ${res.status}`,
+      };
+    } catch (e) {
+      const err = e as AxiosError<{ msg?: string }>;
+      return {
+        ok: false,
+        error: err.response?.data?.msg ?? err.message ?? 'Unknown error',
+      };
+    }
+  }
+
+  /** Публичная сводка 24h по символу (GET /api/v3/ticker/24hr). */
+  async getTicker24hr(symbol: string): Promise<SpotTicker24hrResult> {
+    const base = this.getBaseUrl().replace(/\/$/, '');
+    const sym = symbol.trim().toUpperCase();
+    try {
+      const res = await axios.get(`${base}/api/v3/ticker/24hr`, {
+        params: { symbol: sym },
+        timeout: 15_000,
+        validateStatus: () => true,
+      });
+      if (res.status >= 200 && res.status < 300) {
+        const d = res.data as {
+          lastPrice?: string;
+          priceChangePercent?: string;
+          highPrice?: string;
+          lowPrice?: string;
+          volume?: string;
+        };
+        const lastPrice = d.lastPrice != null ? parseFloat(d.lastPrice) : NaN;
+        const priceChangePercent =
+          d.priceChangePercent != null
+            ? parseFloat(d.priceChangePercent)
+            : NaN;
+        const highPrice = d.highPrice != null ? parseFloat(d.highPrice) : NaN;
+        const lowPrice = d.lowPrice != null ? parseFloat(d.lowPrice) : NaN;
+        const volume = d.volume != null ? parseFloat(d.volume) : NaN;
+        if (
+          Number.isFinite(lastPrice) &&
+          lastPrice > 0 &&
+          Number.isFinite(priceChangePercent) &&
+          Number.isFinite(highPrice) &&
+          Number.isFinite(lowPrice) &&
+          Number.isFinite(volume)
+        ) {
+          return {
+            ok: true,
+            lastPrice,
+            priceChangePercent,
+            highPrice,
+            lowPrice,
+            volume,
+          };
         }
       }
       const err = res.data as { msg?: string };
