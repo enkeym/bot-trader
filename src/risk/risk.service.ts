@@ -8,9 +8,12 @@ import {
 import { BinanceSpotService } from '../binance/binance-spot.service';
 import { PrismaService } from '../prisma/prisma.service';
 
-export type AutotradeCircuitReason =
-  | 'equity_drawdown_vs_baseline'
-  | 'consecutive_loss_sells';
+export type AutotradeCircuitReason = 'equity_drawdown_vs_baseline';
+
+export interface AutotradeCircuitBlocked {
+  ok: false;
+  reason: AutotradeCircuitReason;
+}
 
 export interface RiskCheckInput {
   grossSpreadPercent: number;
@@ -139,27 +142,48 @@ export class RiskService {
   }
 
   /**
-   * Пауза автоторговли при просадке эквити относительно STATS_EQUITY_BASELINE_USDT
-   * или при серии убыточных SELL (реальные ордера, не DRY_RUN).
+   * Только просадка эквити от baseline (серия убыточных SELL обрабатывается
+   * в AutoTradeService: выключение флага автоторговли).
    */
   async checkAutotradeCircuitBreakers(
-    now: Date = new Date(),
-  ): Promise<
-    { ok: true } | { ok: false; reason: AutotradeCircuitReason }
-  > {
-    const dryRun = this.config.get<boolean>('dryRun') ?? true;
-    if (dryRun) return { ok: true };
-
-    const eq = await this.checkEquityDrawdownVsBaseline(now);
-    if (!eq.ok) return eq;
-
-    return this.checkConsecutiveLosingSells();
+    _now: Date = new Date(),
+  ): Promise<{ ok: true } | AutotradeCircuitBlocked> {
+    return this.checkEquityDrawdownVsBaseline();
   }
 
-  private async checkEquityDrawdownVsBaseline(
-    _now: Date,
-  ): Promise<
-    { ok: true } | { ok: false; reason: 'equity_drawdown_vs_baseline' }
+  /**
+   * Последние N исполненных Spot SELL с отрицательным realizedPnlUsdtEstimate подряд.
+   * `MAX_CONSECUTIVE_LOSS_SELLS=0` — всегда false.
+   */
+  async hasConsecutiveLossStreak(): Promise<boolean> {
+    const n = this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
+    if (!(n > 0)) return false;
+
+    const rows = await this.prisma.orderIntent.findMany({
+      where: {
+        provider: 'binance_spot',
+        status: 'EXECUTED',
+        side: { contains: 'SELL' },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: n,
+      select: { payload: true },
+    });
+
+    if (rows.length < n) return false;
+
+    for (const row of rows) {
+      const est = (row.payload as SpotPayloadForLoss | null)?.roundtrip
+        ?.realizedPnlUsdtEstimate;
+      if (est == null || typeof est !== 'number' || est >= 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async checkEquityDrawdownVsBaseline(): Promise<
+    { ok: true } | AutotradeCircuitBlocked
   > {
     const baseline =
       this.config.get<number | null>('stats.equityBaselineQuote') ?? null;
@@ -192,33 +216,5 @@ export class RiskService {
       return { ok: false, reason: 'equity_drawdown_vs_baseline' };
     }
     return { ok: true };
-  }
-
-  private async checkConsecutiveLosingSells(): Promise<
-    { ok: true } | { ok: false; reason: 'consecutive_loss_sells' }
-  > {
-    const n = this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
-    if (!(n > 0)) return { ok: true };
-
-    const rows = await this.prisma.orderIntent.findMany({
-      where: {
-        provider: 'binance_spot',
-        status: 'EXECUTED',
-        side: { contains: 'SELL' },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: n,
-      select: { payload: true },
-    });
-    if (rows.length < n) return { ok: true };
-
-    for (const row of rows) {
-      const est = (row.payload as SpotPayloadForLoss | null)?.roundtrip
-        ?.realizedPnlUsdtEstimate;
-      if (est == null || typeof est !== 'number' || est >= 0) {
-        return { ok: true };
-      }
-    }
-    return { ok: false, reason: 'consecutive_loss_sells' };
   }
 }

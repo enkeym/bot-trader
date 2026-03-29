@@ -41,10 +41,6 @@ class EnvironmentVariables {
   @IsString()
   BINANCE_API_SECRET?: string;
 
-  @IsOptional()
-  @IsBoolean()
-  DRY_RUN?: boolean;
-
   @IsEnum(ExecutionMode)
   EXECUTION_MODE!: ExecutionMode;
 
@@ -112,13 +108,7 @@ export function validateEnv(config: Record<string, unknown>) {
   if (coerce.P2P_TAKER_FEE_PERCENT == null) coerce.P2P_TAKER_FEE_PERCENT = '0';
   if (coerce.MAX_DAILY_SPOT_TRADES == null)
     coerce.MAX_DAILY_SPOT_TRADES = undefined;
-  if (coerce.DRY_RUN == null) coerce.DRY_RUN = 'true';
   if (coerce.PORT !== undefined) coerce.PORT = Number(coerce.PORT);
-  if (coerce.DRY_RUN !== undefined)
-    coerce.DRY_RUN =
-      coerce.DRY_RUN === true ||
-      coerce.DRY_RUN === 'true' ||
-      coerce.DRY_RUN === '1';
   if (coerce.REQUIRE_TON_ACCESS !== undefined)
     coerce.REQUIRE_TON_ACCESS =
       coerce.REQUIRE_TON_ACCESS === true ||

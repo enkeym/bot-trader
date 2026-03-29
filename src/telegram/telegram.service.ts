@@ -200,14 +200,9 @@ export class TelegramService
 
       if (!arg || arg === 'status') {
         const st = await this.autoTrade.getState();
-        const dry = this.config.get<boolean>('dryRun');
         const key = this.config.get<string>('binance.apiKey');
         const hasKeys = Boolean(key?.trim());
-        const mode = dry
-          ? 'бумага (Spot не вызывается)'
-          : hasKeys
-            ? 'Spot Binance'
-            : 'нет API-ключей';
+        const mode = hasKeys ? 'Spot Binance' : 'нет API-ключей';
         await ctx.reply(
           [
             `Автоторговля: ${st.autoTradeEnabled ? 'ВКЛ' : 'ВЫКЛ'}`,

@@ -39,21 +39,27 @@ export default () => ({
     spotStrategy:
       (process.env.BINANCE_SPOT_STRATEGY as 'fixed_side' | 'roundtrip') ??
       'fixed_side',
-    /** Порог take-profit к средней цене входа (%, напр. 0.15 = 0.15%) */
+    /**
+     * Take-profit к средней цене входа (%). Дефолт 0.65 — разумный шаг к балансу со стопом ~1%.
+     * Следующий шаг: поднять до 1.0 и MIN_TAKE ниже (см. roundtripMinTakeProfitPercent).
+     */
     roundtripTakeProfitPercent: parseFloat(
-      process.env.BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT ?? '0.15',
+      process.env.BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT ?? '0.65',
     ),
     /**
-     * 0 = выкл. Нижняя граница тейка (%) — не уже, чем комиссии/slippage (напр. 0.28).
+     * 0 = выкл. Нижняя граница эффективного тейка: max(TAKE, MIN, ASSUMED_FEE).
+     * Дефолт 0.35 — пол не ниже комиссий; не задавайте выше желаемого TAKE.
+     * Следующий шаг при TAKE=1.0: MIN ≈ 0.45 (если комиссии выросли — чуть выше).
      */
     roundtripMinTakeProfitPercent: parseFloat(
-      process.env.BINANCE_SPOT_ROUNDTRIP_MIN_TAKE_PROFIT_PERCENT ?? '0',
+      process.env.BINANCE_SPOT_ROUNDTRIP_MIN_TAKE_PROFIT_PERCENT ?? '0.35',
     ),
     /**
-     * 0 = выкл. Оценка полного круга BUY+SELL в % (обе стороны taker и т.д.) — поднимает эффективный тейк.
+     * Оценка полного круга BUY+SELL (% taker и т.д.) — участвует в max() с TAKE и MIN.
+     * Держите близко к реальности; занижать нельзя «ради красивого процента».
      */
     roundtripAssumedRoundtripFeePercent: parseFloat(
-      process.env.BINANCE_SPOT_ASSUMED_ROUNDTRIP_FEE_PERCENT ?? '0',
+      process.env.BINANCE_SPOT_ASSUMED_ROUNDTRIP_FEE_PERCENT ?? '0.22',
     ),
     /**
      * 0 = выкл. Если свободной базы на Spot **меньше**, чем учёт tracked, и недостаток
@@ -145,7 +151,6 @@ export default () => ({
       ),
     ),
   },
-  dryRun: process.env.DRY_RUN !== 'false',
   executionMode:
     (process.env.EXECUTION_MODE as ExecutionMode) ??
     ExecutionMode.AUTO_EXCHANGE_ONLY,

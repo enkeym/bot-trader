@@ -9,7 +9,6 @@ export type TradeExportMeta = {
   spotSymbol: string;
   spotStrategy: 'fixed_side' | 'roundtrip';
   spotBaseUrl: string;
-  dryRun: boolean;
   rowCount: number;
   truncated: boolean;
 };
@@ -60,8 +59,6 @@ export class TradeExportService {
     const spotBaseUrl =
       this.config.get<string>('binance.spotBaseUrl') ??
       'https://api.binance.com';
-    const dryRun = this.config.get<boolean>('dryRun') ?? true;
-
     const rows = await this.prisma.orderIntent.findMany({
       where: {
         provider: { in: ['binance', 'binance_spot'] },
@@ -81,7 +78,6 @@ export class TradeExportService {
         spotSymbol,
         spotStrategy,
         spotBaseUrl,
-        dryRun,
         rowCount: trades.length,
         truncated,
       },

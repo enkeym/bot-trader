@@ -9,7 +9,6 @@ import axios from 'axios';
 import { BinanceSpotService } from '../binance/binance-spot.service';
 import { AuditService } from '../audit/audit.service';
 import {
-  SimPayload,
   SpotLivePayload,
   SimulationService,
 } from '../order/simulation.service';
@@ -18,7 +17,10 @@ import {
   parseSpotExchangeFill,
 } from '../order/balance-telegram.format';
 import { PrismaService } from '../prisma/prisma.service';
-import { RiskService } from '../risk/risk.service';
+import {
+  AutotradeCircuitBlocked,
+  RiskService,
+} from '../risk/risk.service';
 
 const BOT_STATE_ID = 'default';
 const AUTOTRADE_SKIP_AUDIT_MS = 600_000;
@@ -30,6 +32,13 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   private lastScheduleSkipAuditAt = 0;
   private lastDailyLimitAuditAt = 0;
   private lastCircuitAuditAt = 0;
+  /** Дубли Telegram по одному эпизоду просадки эквити */
+  private lastCircuitTelegramNotifyKey = '';
+  /**
+   * Серия убыточных SELL уже привела к авто-выключению; сбрасывается, когда серия в БД прерывается.
+   * Пока true — повторно не выключаем (можно снова включить автоторговлю вручную).
+   */
+  private consecutiveLossAutoOffLatched = false;
 
   constructor(
     private readonly config: ConfigService,
@@ -47,13 +56,12 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       update: {},
     });
     const ms = this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
-    const dryRun = this.config.get<boolean>('dryRun') ?? true;
     this.intervalRef = setInterval(() => void this.tick(), ms);
     this.logger.log(
-      `Auto-trade tick каждые ${ms} ms — ` +
-        (dryRun
-          ? 'DRY_RUN=true: записи SIMULATED, Spot не вызывается'
-          : 'DRY_RUN=false: при ключах Spot — реальные ордера на BINANCE_SPOT_BASE_URL'),
+      `Auto-trade tick каждые ${ms} ms — Spot MARKET при сигнале (` +
+        (this.config.get<string>('binance.spotBaseUrl') ??
+          'https://api.binance.com') +
+        ')',
     );
   }
 
@@ -116,8 +124,29 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const lossStreak = await this.risk.hasConsecutiveLossStreak();
+    if (!lossStreak) {
+      this.consecutiveLossAutoOffLatched = false;
+    } else if (!this.consecutiveLossAutoOffLatched) {
+      this.consecutiveLossAutoOffLatched = true;
+      const n =
+        this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
+      await this.setEnabled(false);
+      void this.audit.log('info', 'autotrade_disabled_consecutive_loss_sells', {
+        utc: now.toISOString(),
+        maxConsecutiveLossSells: n,
+      });
+      void this.notifyAutotradeDisabledByLossStreak(n);
+      return;
+    }
+
     const circuit = await this.risk.checkAutotradeCircuitBreakers(now);
     if (!circuit.ok) {
+      const notifyKey = `equity:${circuit.reason}`;
+      if (notifyKey !== this.lastCircuitTelegramNotifyKey) {
+        this.lastCircuitTelegramNotifyKey = notifyKey;
+        void this.notifyUserCircuitBlocked(circuit);
+      }
       const t = Date.now();
       if (t - this.lastCircuitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
         this.lastCircuitAuditAt = t;
@@ -129,20 +158,19 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    this.lastCircuitTelegramNotifyKey = '';
+
     const maxNotional =
       this.config.get<number>('strategy.maxNotionalUsdt') ?? 500;
-    const dryRun = this.config.get<boolean>('dryRun') ?? true;
 
     try {
       const res = await this.simulation.runPairSimulation(maxNotional);
       if (!res.ok || !res.orderCreated || !res.order) return;
 
-      const chatId =
-        this.config.get<string>('telegramAlertChatId') ??
-        (await this.getState()).notifyChatId;
+      const chatId = await this.resolveNotifyChatId();
       if (!chatId) return;
 
-      const text = await this.buildTradeNotification(res, dryRun);
+      const text = await this.buildTradeNotification(res);
       await this.sendTelegram(chatId, text);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -152,7 +180,6 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
 
   private async buildTradeNotification(
     res: Awaited<ReturnType<SimulationService['runPairSimulation']>>,
-    dryRun: boolean,
   ): Promise<string> {
     const o = res.order;
     if (!o) return '';
@@ -163,43 +190,6 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       ? pairFil.baseAsset
       : spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
     const quoteAsset = pairFil.ok ? pairFil.quoteAsset : 'USDT';
-
-    if (dryRun && o.status === 'SIMULATED') {
-      const p = o.payload as SimPayload | null;
-      const rt = p?.roundtrip;
-      if (rt) {
-        const exitPaper =
-          rt.chosenSide === 'SELL'
-            ? rt.exitKind === 'stop_loss'
-              ? ' · стоп'
-              : rt.exitKind === 'emergency_drawdown'
-                ? ' · аварийно от пика'
-                : rt.exitKind === 'take_profit'
-                  ? ' · тейк'
-                  : ''
-            : '';
-        const lines =
-          rt.chosenSide === 'BUY'
-            ? [
-                `🟢 Покупка (тест) ${spotSym}`,
-                `Котировка в шаге ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
-                `После шага в учёте: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset}`,
-              ]
-            : [
-                `🔴 Продажа (тест) ${spotSym}${exitPaper}`,
-                `Котировка в шаге ~${rt.markPrice.toFixed(2)} ${quoteAsset} за 1 ${baseAsset}`,
-                `После шага в учёте: ${rt.trackedBtcAfter.toFixed(8)} ${baseAsset}, средняя ~${rt.avgEntryUsdtAfter.toFixed(2)} ${quoteAsset}`,
-              ];
-        return [...lines, '', 'Без биржи, только запись в журнал'].join('\n');
-      }
-      return [
-        '📊 Сигнал стратегии',
-        `🔗 Пара: ${spotSym}`,
-        `💵 Объём в расчёте: ~${p?.notionalUsdt ?? '—'} (USDT в сигнале P2P)`,
-        '',
-        '📋 Запись в журнале · Spot не вызывался',
-      ].join('\n');
-    }
 
     const pl = o.payload as SpotLivePayload | null;
     if (o.status === 'FAILED') {
@@ -250,6 +240,9 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       const bq = Number(baseQty);
       const qq = Number(quoteQty);
       const px = bq > 0 ? qq / bq : NaN;
+      if (exitKind === 'stop_loss') {
+        head.push('🛡 Срабатывание стоп-лосса (roundtrip)');
+      }
       head.push(`🔴 Продажа ${sym}`);
       if (exitWhy != null) {
         head.push(exitWhy);
@@ -305,6 +298,44 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     }
 
     return head.join('\n');
+  }
+
+  private async resolveNotifyChatId(): Promise<string | null> {
+    const fromEnv = this.config.get<string>('telegramAlertChatId');
+    if (fromEnv?.trim()) return fromEnv.trim();
+    try {
+      const st = await this.getState();
+      return st.notifyChatId?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async notifyUserCircuitBlocked(_circuit: AutotradeCircuitBlocked) {
+    const chatId = await this.resolveNotifyChatId();
+    if (!chatId) return;
+
+    const body =
+      'Автоторговля на паузе (тик не торгует): просадка портфеля относительно STATS_EQUITY_BASELINE_USDT выше лимита AUTO_TRADE_MAX_EQUITY_DRAWDOWN_PERCENT. Можно выключить автоторговлю или изменить лимиты в .env.';
+
+    const text = ['⏸️ Блокировка автоторговли (просадка эквити)', '', body].join(
+      '\n',
+    );
+    await this.sendTelegram(chatId, text);
+  }
+
+  private async notifyAutotradeDisabledByLossStreak(n: number) {
+    const chatId = await this.resolveNotifyChatId();
+    if (!chatId) return;
+
+    const text = [
+      '⏹️ Автоторговля выключена',
+      '',
+      `Подряд ${n} убыточных продаж Spot (часто выходы по стоп-лоссу). Флаг autoTrade выставлен в ВЫКЛ — как при команде «выключить автоторговлю».`,
+      '',
+      'Команды бота снова в обычном режиме. Когда будете готовы, включите автоторговлю сами.',
+    ].join('\n');
+    await this.sendTelegram(chatId, text);
   }
 
   private async sendTelegram(chatId: string, text: string) {
