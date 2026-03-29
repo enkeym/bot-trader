@@ -8,6 +8,8 @@
 
 COMPOSE := docker compose
 SLEEP_DB := sleep 3
+# Совпадает с `name:` в docker-compose.yml (label образов compose)
+COMPOSE_PROJECT_NAME ?= bot-trader
 # Должны совпадать с POSTGRES_* в docker-compose / .env (по умолчанию trader)
 POSTGRES_USER ?= trader
 POSTGRES_DB ?= trader
@@ -20,7 +22,7 @@ help:
 	@echo "    make infra       — только Postgres + Redis (локально под npm run start:dev)"
 	@echo "    make down        — остановить контейнеры (данные в volume сохраняются)"
 	@echo "    make restart     — перезапустить контейнеры"
-	@echo "    make rebuild     — pull образов и пересоздать контейнеры"
+	@echo "    make rebuild     — по очереди: down → clean → up (чистая пересборка образа)"
 	@echo "    make destroy     — остановить и УДАЛИТЬ volumes (БД будет пустой!)"
 	@echo "    make logs        — логи контейнеров (follow)"
 	@echo "    make ps          — статус контейнеров"
@@ -39,7 +41,7 @@ help:
 	@echo "    make prisma-generate — только сгенерировать клиент"
 	@echo ""
 	@echo "  Прочее:"
-	@echo "    make clean       — удалить dist/"
+	@echo "    make clean       — dist/, образ сервиса bot-trader проекта, docker image prune, builder prune (кеш сборки)"
 	@echo "    make clean-data  — очистить данные: TRUNCATE в Postgres + FLUSHALL в Redis (docker compose: postgres и redis; без npx). При другом POSTGRES_*: make clean-data POSTGRES_USER=u POSTGRES_DB=d"
 	@echo "    make clean-all   — clean + node_modules/"
 	@echo "    make lint        — eslint"
@@ -59,9 +61,11 @@ down:
 restart:
 	@$(COMPOSE) restart
 
+# Порядок: остановка стека → dist + prune Docker → подъём с --build (после prune сборка без кеша)
 rebuild:
-	@$(COMPOSE) pull
-	@$(COMPOSE) up -d --force-recreate
+	@$(MAKE) down
+	@$(MAKE) clean
+	@$(MAKE) up
 
 destroy:
 	@$(COMPOSE) down -v
@@ -110,17 +114,16 @@ prisma-generate:
 
 clean:
 	@rm -rf dist
+	@rm -rf node_modules
+	@docker system prune -af --volumes
 
-# TRUNCATE всех таблиц из prisma/schema.prisma; Redis — весь инстанс (FLUSHALL).
-# Через psql в контейнере postgres — работает без Node/npx на хосте (см. docker-compose.yml).
+
 clean-data:
 	@echo "Очистка PostgreSQL (таблицы OrderIntent, AuditLog, TelegramUser, BotState)..."
 	@$(COMPOSE) exec -T postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) -v ON_ERROR_STOP=1 -c 'TRUNCATE TABLE "OrderIntent", "AuditLog", "TelegramUser", "BotState" RESTART IDENTITY CASCADE;'
 	@echo "Очистка Redis (docker compose service redis)..."
 	@$(COMPOSE) exec -T redis redis-cli FLUSHALL
 
-clean-all: clean
-	@rm -rf node_modules
 
 lint:
 	@npm run lint
