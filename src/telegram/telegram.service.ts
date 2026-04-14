@@ -15,9 +15,12 @@ import { TradeExportService } from '../order/trade-export.service';
 
 const MAX_MSG = 4000;
 
-const BTN_STATS = '📊 Статистика';
 const BTN_AUTO_ON = '▶️ Включить автоторговлю';
 const BTN_AUTO_OFF = '⏹ Выключить автоторговлю';
+const BTN_STATS = '📊 Статистика';
+const BTN_HISTORY = '📜 История';
+const BTN_SIGNAL = '📡 Сигнал рынка';
+const BTN_EXPORT = '📦 Выгрузка JSON';
 
 @Injectable()
 export class TelegramService
@@ -104,6 +107,14 @@ export class TelegramService
         { reply_markup: await this.mainKeyboardForUser(ctx) },
       );
     };
+    const historyHandler = async (ctx: Context) => {
+      if (!this.isTelegramAdmin(ctx)) return;
+      const text = await this.simulation.buildTelegramTradingHistoryReport();
+      await ctx.reply(
+        text.length > MAX_MSG ? text.slice(0, MAX_MSG) + '…' : text,
+        { reply_markup: await this.mainKeyboardForUser(ctx) },
+      );
+    };
 
     this.bot.command('start', async (ctx) => {
       if (!this.isTelegramAdmin(ctx)) return;
@@ -112,8 +123,8 @@ export class TelegramService
         [
           'Трейдер Binance Spot + сигнал по P2P-спреду.',
           '',
-          'Кнопки ниже — статистика и (для админа) автоторговля.',
-          'Команды: /stats, /market, /autotrade (админ: /trades_export)',
+          'Кнопки ниже — статистика, сигнал рынка и автоторговля.',
+          'Команды: /stats, /market, /autotrade',
         ].join('\n'),
         { reply_markup: await this.mainKeyboardForUser(ctx) },
       );
@@ -139,6 +150,62 @@ export class TelegramService
       )
       .use(statsHandler);
 
+    this.bot
+      .filter(
+        (ctx) =>
+          ctx.hasCommand('history') ||
+          ctx.hasCommand('история') ||
+          ctx.hasText(BTN_HISTORY),
+      )
+      .use(historyHandler);
+
+    const signalHandler = async (ctx: Context) => {
+      if (!this.isTelegramAdmin(ctx)) return;
+      const signal = await this.simulation.computeMarketEntrySignal();
+      const verdictRu =
+        signal.verdict === 'DA'
+          ? '✅ ДА'
+          : signal.verdict === 'OSTOROZHNO'
+            ? '⚠️ ОСТОРОЖНО'
+            : '🚫 НЕТ';
+      const text = [
+        '--- СИГНАЛ РЫНКА ---',
+        `Входить в рынок: ${verdictRu}`,
+        `Score: ${signal.score}/100`,
+        `Тренд 24h: ${signal.trend24h.changePct >= 0 ? '+' : ''}${signal.trend24h.changePct.toFixed(1)}% (${signal.trend24h.label})`,
+        `Тренд 7d: ${signal.trend7d.changePct >= 0 ? '+' : ''}${signal.trend7d.changePct.toFixed(1)}% (${signal.trend7d.label})`,
+        `Волатильность: ${signal.volatility.stdev.toFixed(2)} (${signal.volatility.label})`,
+        `Win rate 20: ${signal.winRate.rate.toFixed(0)}% (${signal.winRate.wins}/${signal.winRate.total})`,
+      ].join('\n');
+      await ctx.reply(text, {
+        reply_markup: await this.mainKeyboardForUser(ctx),
+      });
+    };
+
+    this.bot
+      .filter((ctx) => ctx.hasText(BTN_SIGNAL))
+      .use(signalHandler);
+
+    const exportHandler = async (ctx: Context) => {
+      if (!this.isTelegramAdmin(ctx)) return;
+      const maxRows = 5000;
+      const bundle = await this.tradeExport.buildBundle(maxRows);
+      const json = this.tradeExport.buildJsonPretty(bundle);
+      const buf = Buffer.from(json, 'utf8');
+      const name = `trades-export-${bundle.meta.generatedAt.slice(0, 10)}.json`;
+      const cap = bundle.meta.truncated
+        ? `Усечено до ${maxRows} записей.`
+        : `Записей: ${bundle.meta.rowCount}.`;
+      await ctx.replyWithDocument(new InputFile(buf, name), {
+        caption: cap,
+        reply_markup: await this.mainKeyboardForUser(ctx),
+      });
+    };
+
+    this.bot
+      .filter((ctx) => ctx.hasText(BTN_EXPORT))
+      .use(exportHandler);
+
     this.bot.command('market', async (ctx) => {
       if (!this.isTelegramAdmin(ctx)) return;
       const arg = ctx.message?.text?.trim().split(/\s+/)[1];
@@ -155,26 +222,6 @@ export class TelegramService
         text.length > MAX_MSG ? text.slice(0, MAX_MSG) + '…' : text,
         { reply_markup: await this.mainKeyboardForUser(ctx) },
       );
-    });
-
-    this.bot.command('trades_export', async (ctx) => {
-      if (!this.isTelegramAdmin(ctx)) return;
-      const parts = ctx.message?.text?.trim().split(/\s+/);
-      let maxRows = 5000;
-      if (parts?.[1] && /^\d+$/.test(parts[1])) {
-        maxRows = Math.min(8000, Math.max(1, parseInt(parts[1], 10)));
-      }
-      const bundle = await this.tradeExport.buildBundle(maxRows);
-      const json = this.tradeExport.buildJsonPretty(bundle);
-      const buf = Buffer.from(json, 'utf8');
-      const name = `trades-export-${bundle.meta.generatedAt.slice(0, 10)}.json`;
-      const cap = bundle.meta.truncated
-        ? `Усечено до ${maxRows} записей (есть более старые в БД).`
-        : `Записей: ${bundle.meta.rowCount}.`;
-      await ctx.replyWithDocument(new InputFile(buf, name), {
-        caption: cap,
-        reply_markup: await this.mainKeyboardForUser(ctx),
-      });
     });
 
     this.bot.hears(BTN_AUTO_ON, async (ctx) => {
@@ -237,12 +284,9 @@ export class TelegramService
         { command: 'start', description: 'Меню и кнопки' },
         { command: 'menu', description: 'Показать клавиатуру' },
         { command: 'stats', description: 'Статистика' },
+        { command: 'history', description: 'История операций' },
         { command: 'market', description: 'Свечи: 24h/7d/30d по паре Spot' },
         { command: 'autotrade', description: 'Автоторговля (админ)' },
-        {
-          command: 'trades_export',
-          description: 'Экспорт сделок JSON (админ)',
-        },
       ])
       .then(() =>
         this.logger.log(
@@ -285,10 +329,13 @@ export class TelegramService
     );
   }
 
-  /** Клавиатура: статистика; для админа — одна кнопка вкл/выкл авто. */
   private async mainKeyboardForUser(ctx: Context): Promise<Keyboard> {
     if (!this.isTelegramAdmin(ctx)) {
-      return new Keyboard().text(BTN_STATS).resized().persistent();
+      return new Keyboard()
+        .text(BTN_STATS)
+        .text(BTN_HISTORY)
+        .resized()
+        .persistent();
     }
 
     const st = await this.prisma.botState.findUnique({
@@ -297,6 +344,10 @@ export class TelegramService
     const on = st?.autoTradeEnabled ?? false;
     return new Keyboard()
       .text(BTN_STATS)
+      .text(BTN_HISTORY)
+      .row()
+      .text(BTN_SIGNAL)
+      .text(BTN_EXPORT)
       .row()
       .text(on ? BTN_AUTO_OFF : BTN_AUTO_ON)
       .resized()

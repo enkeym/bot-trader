@@ -37,9 +37,11 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   /** Дубли Telegram по одному эпизоду просадки эквити */
   private lastCircuitTelegramNotifyKey = '';
   /**
-   * Серия убыточных SELL уже привела к авто-выключению; сбрасывается, когда серия в БД прерывается.
-   * Пока true — повторно не выключаем (можно снова включить автоторговлю вручную).
+   * Временная пауза после серии убыточных SELL (вместо полной остановки).
+   * Если LOSS_STREAK_COOLDOWN_MS > 0, бот паузится на это время и автовозобновляется.
+   * Если 0 — старое поведение (полная остановка).
    */
+  private lossStreakPauseUntil = 0;
   private consecutiveLossAutoOffLatched = false;
 
   constructor(
@@ -126,6 +128,18 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (Date.now() < this.lossStreakPauseUntil) {
+      const t = Date.now();
+      if (t - this.lastDailyLimitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
+        this.lastDailyLimitAuditAt = t;
+        void this.audit.log('info', 'autotrade_skipped_loss_streak_pause', {
+          utc: now.toISOString(),
+          resumeAt: new Date(this.lossStreakPauseUntil).toISOString(),
+        });
+      }
+      return;
+    }
+
     const lossStreak = await this.risk.hasConsecutiveLossStreak();
     if (!lossStreak) {
       this.consecutiveLossAutoOffLatched = false;
@@ -133,12 +147,27 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       this.consecutiveLossAutoOffLatched = true;
       const n =
         this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
+      const cooldownMs =
+        this.config.get<number>('strategy.lossStreakCooldownMs') ?? 0;
+
+      if (cooldownMs > 0) {
+        this.lossStreakPauseUntil = Date.now() + cooldownMs;
+        void this.audit.log('info', 'autotrade_paused_loss_streak', {
+          utc: now.toISOString(),
+          maxConsecutiveLossSells: n,
+          cooldownMs,
+          resumeAt: new Date(this.lossStreakPauseUntil).toISOString(),
+        });
+        void this.notifyAutotradeDisabledByLossStreak(n, cooldownMs);
+        return;
+      }
+
       await this.setEnabled(false);
       void this.audit.log('info', 'autotrade_disabled_consecutive_loss_sells', {
         utc: now.toISOString(),
         maxConsecutiveLossSells: n,
       });
-      void this.notifyAutotradeDisabledByLossStreak(n);
+      void this.notifyAutotradeDisabledByLossStreak(n, 0);
       return;
     }
 
@@ -326,22 +355,39 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     await this.sendTelegram(chatId, text);
   }
 
-  private async notifyAutotradeDisabledByLossStreak(n: number) {
+  private async notifyAutotradeDisabledByLossStreak(
+    n: number,
+    cooldownMs: number,
+  ) {
     const chatId = await this.resolveNotifyChatId();
     if (!chatId) return;
 
-    const text = [
-      '⏹️ Автоторговля выключена',
-      '',
-      `Подряд ${n} убыточных продаж Spot (часто выходы по стоп-лоссу). Флаг autoTrade выставлен в ВЫКЛ — как при команде «выключить автоторговлю».`,
-      '',
-      'Команды бота снова в обычном режиме. Когда будете готовы, включите автоторговлю сами.',
-    ].join('\n');
-    await this.sendTelegram(chatId, text, {
-      keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
-      resize_keyboard: true,
-      is_persistent: true,
-    });
+    if (cooldownMs > 0) {
+      const mins = Math.round(cooldownMs / 60_000);
+      const text = [
+        '⏸️ Автоторговля на паузе',
+        '',
+        `Подряд ${n} убыточных продаж Spot. Пауза на ${mins} мин, затем автовозобновление.`,
+      ].join('\n');
+      await this.sendTelegram(chatId, text, {
+        keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
+        resize_keyboard: true,
+        is_persistent: true,
+      });
+    } else {
+      const text = [
+        '⏹️ Автоторговля выключена',
+        '',
+        `Подряд ${n} убыточных продаж Spot (часто выходы по стоп-лоссу). Флаг autoTrade выставлен в ВЫКЛ.`,
+        '',
+        'Когда будете готовы, включите автоторговлю сами.',
+      ].join('\n');
+      await this.sendTelegram(chatId, text, {
+        keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
+        resize_keyboard: true,
+        is_persistent: true,
+      });
+    }
   }
 
   private async sendTelegram(

@@ -94,6 +94,14 @@ export default () => ({
     roundtripEmergencyDrawdownPercent: parseFloat(
       process.env.BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT ?? '0',
     ),
+    /** Порог изменения 24h для полной остановки покупок (напр. -10). 0 = выкл. */
+    crashHaltChange24hPct: parseFloat(
+      process.env.BINANCE_SPOT_CRASH_HALT_CHANGE_24H_PCT ?? '0',
+    ),
+    /** Порог изменения 24h для уменьшения позиции вдвое (напр. -5). 0 = выкл. */
+    crashReduceChange24hPct: parseFloat(
+      process.env.BINANCE_SPOT_CRASH_REDUCE_CHANGE_24H_PCT ?? '0',
+    ),
     /** 0 = выкл. Не BUY, если σ доходностей 1h за 24h выше порога (п.п.). */
     skipBuyVolatilityStdevGt: parseFloat(
       process.env.BINANCE_SPOT_SKIP_BUY_VOLATILITY_STDDEV_GT ?? '0',
@@ -171,6 +179,11 @@ export default () => ({
      */
     maxConsecutiveLossSells: parseInt(
       process.env.MAX_CONSECUTIVE_LOSS_SELLS ?? '0',
+      10,
+    ),
+    /** Cooldown после серии убытков (мс). 0 = полная остановка (старое поведение). */
+    lossStreakCooldownMs: parseInt(
+      process.env.LOSS_STREAK_COOLDOWN_MS ?? '0',
       10,
     ),
     takerFeePercent: parseFloat(process.env.P2P_TAKER_FEE_PERCENT ?? '0'),

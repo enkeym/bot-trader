@@ -371,6 +371,130 @@ export class SimulationService {
     });
   }
 
+  /** Exit kind последней исполненной SELL (для адаптивного cooldown). */
+  private async getLastSellExitKind(): Promise<string | null> {
+    const row = await this.prisma.orderIntent.findFirst({
+      where: {
+        provider: 'binance_spot',
+        status: 'EXECUTED',
+        side: { contains: 'SELL' },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { payload: true },
+    });
+    if (!row) return null;
+    const p = row.payload as SpotLivePayload | null;
+    return p?.roundtrip?.exitKind ?? null;
+  }
+
+  /** Число последних подряд убыточных SELL (для адаптивного размера позиции). */
+  private async countRecentConsecutiveLosses(): Promise<number> {
+    const rows = await this.prisma.orderIntent.findMany({
+      where: {
+        provider: 'binance_spot',
+        status: 'EXECUTED',
+        side: { contains: 'SELL' },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: { payload: true },
+    });
+    let count = 0;
+    for (const row of rows) {
+      const p = row.payload as SpotLivePayload | null;
+      const est = p?.roundtrip?.realizedPnlUsdtEstimate;
+      if (est == null || typeof est !== 'number' || est >= 0) break;
+      count++;
+    }
+    return count;
+  }
+
+  /**
+   * Комплексный сигнал входа в рынок. Взвешенная оценка 0-100.
+   * - Тренд 24h (30): >0 бычий, -3..0 нейтральный, <-3 медвежий
+   * - Тренд 7d (20): >0 бычий, -8..0 нейтральный, <-8 медвежий
+   * - Волатильность (25): <0.2 низкая (хорошо), 0.2-0.35 средняя, >0.35 высокая
+   * - Win rate последних 20 сделок (25): >60% хорошо, 40-60% нейтрально, <40% плохо
+   */
+  async computeMarketEntrySignal(): Promise<{
+    score: number;
+    verdict: 'DA' | 'OSTOROZHNO' | 'NET';
+    trend24h: { changePct: number; label: string };
+    trend7d: { changePct: number; label: string };
+    volatility: { stdev: number; label: string };
+    winRate: { rate: number; wins: number; total: number };
+  }> {
+    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
+    const report = await this.marketStats.getReport(symbol);
+
+    const ch24 = report?.windows.h24.changePct ?? 0;
+    const ch7d = report?.windows.h168.changePct ?? 0;
+    const stdev24 = report?.windows.h24.returnStdevPp ?? 0.25;
+
+    let trendScore24 = 50;
+    if (ch24 > 0) trendScore24 = Math.min(100, 60 + ch24 * 10);
+    else if (ch24 >= -3) trendScore24 = 40 + ((ch24 + 3) / 3) * 20;
+    else trendScore24 = Math.max(0, 40 + ch24 * 5);
+
+    let trendScore7d = 50;
+    if (ch7d > 0) trendScore7d = Math.min(100, 55 + ch7d * 3);
+    else if (ch7d >= -8) trendScore7d = 35 + ((ch7d + 8) / 8) * 20;
+    else trendScore7d = Math.max(0, 35 + ch7d * 3);
+
+    let volScore = 50;
+    if (stdev24 < 0.2) volScore = Math.min(100, 70 + (0.2 - stdev24) * 200);
+    else if (stdev24 <= 0.35) volScore = 70 - ((stdev24 - 0.2) / 0.15) * 40;
+    else volScore = Math.max(0, 30 - (stdev24 - 0.35) * 100);
+
+    const sells = await this.prisma.orderIntent.findMany({
+      where: {
+        provider: 'binance_spot',
+        status: 'EXECUTED',
+        side: { contains: 'SELL' },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { payload: true },
+    });
+    let wins = 0;
+    for (const s of sells) {
+      const est = (s.payload as SpotLivePayload | null)?.roundtrip
+        ?.realizedPnlUsdtEstimate;
+      if (est != null && typeof est === 'number' && est > 0) wins++;
+    }
+    const total = sells.length;
+    const winRatePct = total > 0 ? (wins / total) * 100 : 50;
+
+    let wrScore = 50;
+    if (winRatePct > 60) wrScore = Math.min(100, 60 + (winRatePct - 60) * 2);
+    else if (winRatePct >= 40) wrScore = 30 + ((winRatePct - 40) / 20) * 30;
+    else wrScore = Math.max(0, winRatePct * 0.75);
+
+    const score = Math.round(
+      trendScore24 * 0.3 +
+        trendScore7d * 0.2 +
+        volScore * 0.25 +
+        wrScore * 0.25,
+    );
+
+    const trendLabel = (ch: number, lo: number) =>
+      ch > 0 ? 'бычий' : ch >= lo ? 'нейтральный' : 'медвежий';
+    const volLabel =
+      stdev24 < 0.2 ? 'низкая' : stdev24 <= 0.35 ? 'средняя' : 'высокая';
+
+    const verdict: 'DA' | 'OSTOROZHNO' | 'NET' =
+      score >= 60 ? 'DA' : score >= 40 ? 'OSTOROZHNO' : 'NET';
+
+    return {
+      score,
+      verdict,
+      trend24h: { changePct: ch24, label: trendLabel(ch24, -3) },
+      trend7d: { changePct: ch7d, label: trendLabel(ch7d, -8) },
+      volatility: { stdev: stdev24, label: volLabel },
+      winRate: { rate: winRatePct, wins, total },
+    };
+  }
+
   /**
    * Spot roundtrip: при сигнале P2P — BUY до take-profit или SELL учётной позиции по марку.
    */
@@ -654,19 +778,87 @@ export class SimulationService {
         orderCreated: false,
       };
     } else {
-      const cooldownMs =
+      const baseCooldownMs =
         this.config.get<number>('binance.buyCooldownAfterSellMs') ?? 0;
       const lastSellAt = st?.spotRoundtripLastSellAt ?? null;
-      if (
-        cooldownMs > 0 &&
-        lastSellAt != null &&
-        Date.now() - lastSellAt.getTime() < cooldownMs
-      ) {
+      if (baseCooldownMs > 0 && lastSellAt != null) {
+        const lastExitKind = await this.getLastSellExitKind();
+        const cooldownMs =
+          lastExitKind === 'stop_loss' || lastExitKind === 'emergency_drawdown'
+            ? baseCooldownMs * 2
+            : baseCooldownMs;
+        if (Date.now() - lastSellAt.getTime() < cooldownMs) {
+          await this.audit.log('info', 'roundtrip_skip', {
+            reason: 'skip_buy_cooldown_after_sell',
+            cooldownMs,
+            lastExitKind,
+            lastSellAt: lastSellAt.toISOString(),
+            elapsedMs: Date.now() - lastSellAt.getTime(),
+            symbol,
+          });
+          if (tracked > 0) {
+            await this.persistRoundtripState(tracked, avgEntry, peakMark);
+          }
+          return {
+            ev,
+            ok: true,
+            executionMode,
+            order: null,
+            estimatedProfitUsdt,
+            orderCreated: false,
+          };
+        }
+      }
+
+      const regimeReport = await this.marketStats.getReport(symbol);
+
+      const crashHaltPct =
+        this.config.get<number>('binance.crashHaltChange24hPct') ?? 0;
+      const crashReducePct =
+        this.config.get<number>('binance.crashReduceChange24hPct') ?? 0;
+      let crashSizeMultiplier = 1;
+      if (regimeReport && crashHaltPct < 0) {
+        const ch24 = regimeReport.windows.h24.changePct;
+        if (Number.isFinite(ch24) && ch24 <= crashHaltPct) {
+          await this.audit.log('warn', 'roundtrip_skip', {
+            reason: 'crash_halt',
+            changePct24h: ch24,
+            threshold: crashHaltPct,
+            symbol,
+          });
+          if (tracked > 0) {
+            await this.persistRoundtripState(tracked, avgEntry, peakMark);
+          }
+          return {
+            ev,
+            ok: true,
+            executionMode,
+            order: null,
+            estimatedProfitUsdt,
+            orderCreated: false,
+          };
+        }
+        if (
+          crashReducePct < 0 &&
+          Number.isFinite(ch24) &&
+          ch24 <= crashReducePct
+        ) {
+          crashSizeMultiplier = 0.5;
+          void this.audit.log('info', 'roundtrip_crash_reduce', {
+            changePct24h: ch24,
+            threshold: crashReducePct,
+            sizeMultiplier: 0.5,
+            symbol,
+          });
+        }
+      }
+
+      const entrySignal = await this.computeMarketEntrySignal();
+      if (entrySignal.score < 40) {
         await this.audit.log('info', 'roundtrip_skip', {
-          reason: 'skip_buy_cooldown_after_sell',
-          cooldownMs,
-          lastSellAt: lastSellAt.toISOString(),
-          elapsedMs: Date.now() - lastSellAt.getTime(),
+          reason: 'market_signal_negative',
+          score: entrySignal.score,
+          verdict: entrySignal.verdict,
           symbol,
         });
         if (tracked > 0) {
@@ -694,7 +886,6 @@ export class SimulationService {
       const minScale =
         this.config.get<number>('binance.quoteVolatilityMinScale') ?? 0.25;
 
-      const regimeReport = await this.marketStats.getReport(symbol);
       if (regimeReport && skipVol > 0) {
         const st24 = regimeReport.windows.h24.returnStdevPp;
         if (Number.isFinite(st24) && st24 > skipVol) {
@@ -847,6 +1038,9 @@ export class SimulationService {
           enabled: true,
         });
       }
+      const recentLossCount = await this.countRecentConsecutiveLosses();
+      const adaptiveSizeMultiplier = 1 + Math.min(recentLossCount, 2) * 0.125;
+      q = Math.min(q * adaptiveSizeMultiplier * crashSizeMultiplier, maxQuote);
       quoteOrderQty = q;
       if (maxPosQuote > 0) {
         const posVal = tracked * avgEntry;
@@ -1563,14 +1757,59 @@ export class SimulationService {
     out.push(telegramStatsLine(`📈 Серия:   ${streakLine}`));
     out.push(telegramStatsBoxBottom());
 
-    out.push('');
-    out.push(telegramStatsBoxTop('📜 ИСТОРИЯ СДЕЛОК'));
-    out.push(telegramStatsBoxBlank());
+    try {
+      const signal = await this.computeMarketEntrySignal();
+      const verdictRu =
+        signal.verdict === 'DA'
+          ? '✅ ДА'
+          : signal.verdict === 'OSTOROZHNO'
+            ? '⚠️ ОСТОРОЖНО'
+            : '🚫 НЕТ';
+      out.push('');
+      out.push(telegramStatsBoxTop('📡 СИГНАЛ РЫНКА'));
+      out.push(
+        telegramStatsLine(`Входить: ${verdictRu} (${signal.score}/100)`),
+      );
+      out.push(
+        telegramStatsLine(
+          `24h: ${signal.trend24h.changePct >= 0 ? '+' : ''}${signal.trend24h.changePct.toFixed(1)}% · 7d: ${signal.trend7d.changePct >= 0 ? '+' : ''}${signal.trend7d.changePct.toFixed(1)}%`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `σ: ${signal.volatility.stdev.toFixed(2)} (${signal.volatility.label}) · WR: ${signal.winRate.rate.toFixed(0)}%`,
+        ),
+      );
+      out.push(telegramStatsBoxBottom());
+    } catch {
+      /* signal block is optional */
+    }
 
+    out.push('');
+    out.push(`⚙️ Бот работает: ${fmtUptimeProcess(process.uptime())}`);
+    out.push(
+      `🔄 Следующая проверка через ${fmtAutotradeIntervalRu(intervalMs)}`,
+    );
+
+    return out.join('\n');
+  }
+
+  async buildTelegramTradingHistoryReport(): Promise<string> {
+    const symbol = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
+    const pairFil = await this.binanceSpot.getLotSizeFilter(symbol);
+    const baseAsset = pairFil.ok
+      ? pairFil.baseAsset
+      : symbol.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
+
+    const spotAscRows = await this.loadSpotExecutedAsc();
     const recent = await this.prisma.orderIntent.findMany({
       orderBy: { createdAt: 'desc' },
-      take: 8,
+      take: 10,
     });
+
+    const out: string[] = [];
+    out.push(telegramStatsBoxTop('📜 ИСТОРИЯ СДЕЛОК'));
+    out.push(telegramStatsBoxBlank());
 
     if (recent.length === 0) {
       out.push(telegramStatsLine('— пока нет записей.'));
@@ -1581,18 +1820,10 @@ export class SimulationService {
         baseAsset,
       );
       const histLines = buildTelegramStatsHistoryBlocks(histRows);
-      for (const line of histLines) {
-        out.push(line);
-      }
+      for (const line of histLines) out.push(line);
     }
+
     out.push(telegramStatsBoxBottom());
-
-    out.push('');
-    out.push(`⚙️ Бот работает: ${fmtUptimeProcess(process.uptime())}`);
-    out.push(
-      `🔄 Следующая проверка через ${fmtAutotradeIntervalRu(intervalMs)}`,
-    );
-
     return out.join('\n');
   }
 
@@ -1605,77 +1836,6 @@ export class SimulationService {
     profitFromSellsUsdt: number;
   }> {
     return this.aggregateSpotExecStats();
-  }
-
-  /** Последний исполненный MARKET BUY по Spot (для /stats). */
-  private async getLastExecutedSpotBuy(): Promise<{
-    createdAt: Date;
-    baseQty: number;
-    quoteQty: number;
-    avgPrice: number;
-  } | null> {
-    const rows = await this.prisma.orderIntent.findMany({
-      where: { provider: 'binance_spot', status: 'EXECUTED' },
-      orderBy: { createdAt: 'desc' },
-      take: 48,
-      select: { createdAt: true, payload: true },
-    });
-    for (const r of rows) {
-      const p = r.payload as SpotLivePayload | null;
-      if (p?.spot?.side !== 'BUY' || !p.exchangeResponse) continue;
-      const { baseQty, quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
-      if (
-        !Number.isFinite(baseQty) ||
-        baseQty <= 0 ||
-        !Number.isFinite(quoteQty)
-      )
-        continue;
-      return {
-        createdAt: r.createdAt,
-        baseQty,
-        quoteQty,
-        avgPrice: quoteQty / baseQty,
-      };
-    }
-    return null;
-  }
-
-  /** Последний исполненный MARKET SELL по Spot (для /stats). */
-  private async getLastExecutedSpotSell(): Promise<{
-    createdAt: Date;
-    baseQty: number;
-    quoteQty: number;
-    avgPrice: number;
-    exitKind: string | null;
-    realizedPnlUsdt: number | null;
-  } | null> {
-    const rows = await this.prisma.orderIntent.findMany({
-      where: { provider: 'binance_spot', status: 'EXECUTED' },
-      orderBy: { createdAt: 'desc' },
-      take: 48,
-      select: { createdAt: true, payload: true },
-    });
-    for (const r of rows) {
-      const p = r.payload as SpotLivePayload | null;
-      if (p?.spot?.side !== 'SELL' || !p.exchangeResponse) continue;
-      const { baseQty, quoteQty } = parseSpotExchangeFill(p.exchangeResponse);
-      if (
-        !Number.isFinite(baseQty) ||
-        baseQty <= 0 ||
-        !Number.isFinite(quoteQty)
-      )
-        continue;
-      const rtp = p.roundtrip?.realizedPnlUsdtEstimate;
-      return {
-        createdAt: r.createdAt,
-        baseQty,
-        quoteQty,
-        avgPrice: quoteQty / baseQty,
-        exitKind: p.roundtrip?.exitKind ?? null,
-        realizedPnlUsdt: rtp != null && Number.isFinite(rtp) ? rtp : null,
-      };
-    }
-    return null;
   }
 
   private async loadSpotExecutedAsc(): Promise<
