@@ -29,13 +29,9 @@ import { SpreadService } from '../strategy/spread.service';
 import { parseSpotExchangeFill } from './balance-telegram.format';
 import {
   buildTelegramStatsHistoryBlocks,
-  fmtAutotradeIntervalRu,
-  fmtDurationShort,
-  fmtStatsDateTime,
   fmtStatsNumber,
   fmtStatsQtyBase,
   fmtUptimeProcess,
-  fmtVolumeShort,
   pctArrow,
   TelegramStatsHistoryRow,
   telegramStatsBoxBlank,
@@ -1309,11 +1305,6 @@ export class SimulationService {
     const maxQuoteRub =
       this.config.get<number>('binance.spotMaxQuoteRub') ?? 50_000;
     const maxQuote = quoteAsset === 'RUB' ? maxQuoteRub : maxQuoteUsdt;
-    const maxPosUsdt =
-      this.config.get<number>('binance.roundtripMaxPositionUsdt') ?? 0;
-    const maxPosRub =
-      this.config.get<number>('binance.roundtripMaxPositionRub') ?? 0;
-    const maxPosRoundtrip = quoteAsset === 'RUB' ? maxPosRub : maxPosUsdt;
     const spotStrategy =
       this.config.get<'fixed_side' | 'roundtrip'>('binance.spotStrategy') ??
       'fixed_side';
@@ -1333,14 +1324,8 @@ export class SimulationService {
     });
     const slPct =
       this.config.get<number>('binance.roundtripStopLossPercent') ?? 0;
-    const rtAccumulate =
-      this.config.get<boolean>('binance.roundtripAccumulateOnSignal') ?? false;
     const emPctRt =
       this.config.get<number>('binance.roundtripEmergencyDrawdownPercent') ?? 0;
-    const intervalMs =
-      this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
-    const fiat = this.config.get<string>('market.fiat') ?? 'USD';
-    const asset = this.config.get<string>('market.asset') ?? 'USDT';
     const equityBaseline =
       this.config.get<number | null>('stats.equityBaselineQuote') ?? null;
 
@@ -1372,6 +1357,7 @@ export class SimulationService {
 
     const out: string[] = [];
 
+    // ── 1. БАЛАНС ──
     if (!hasKeys) {
       out.push(telegramStatsBoxTop('💲 БАЛАНС'));
       out.push(telegramStatsBoxBlank());
@@ -1422,38 +1408,85 @@ export class SimulationService {
       } else {
         out.push(telegramStatsLine('💼 Портфель: —'));
       }
-      out.push(telegramStatsBoxBlank());
-      if (equityBaseline != null && equityBaseline > 0) {
-        out.push(
-          telegramStatsLine(`🏁 Стартовый депозит: ${fmtQ(equityBaseline)}`),
-        );
-        if (Number.isFinite(equity)) {
-          const diff = equity - equityBaseline;
-          const p = (diff / equityBaseline) * 100;
-          out.push(
-            telegramStatsLine(
-              `${diff >= 0 ? '🟢' : '🔴'} Прибыль: ${diff >= 0 ? '+' : ''}${fmtQ(diff)} ${quoteAsset} (${p >= 0 ? '+' : ''}${p.toFixed(2)}%)`,
-            ),
-          );
-        }
-      }
-      if (
-        Number.isFinite(equity) &&
-        equity > 0 &&
-        Number.isFinite(baseInQuote)
-      ) {
-        const share = (baseInQuote / equity) * 100;
-        out.push(
-          telegramStatsLine(
-            `📊 Доля ${baseAsset}: ${fmtStatsNumber(share, 1, 1)}% от портфеля`,
-          ),
-        );
-      }
       out.push(telegramStatsBoxBottom());
     }
 
+    // ── 2. ПРИБЫЛЬ ──
+    const detail = this.computeSpotTradeAnalyticsFromRows(spotAscRows);
+    const agg = detail.agg;
+    const unrealRt =
+      spotStrategy === 'roundtrip' &&
+      tracked > 0 &&
+      avgE > 0 &&
+      Number.isFinite(markPrice)
+        ? tracked * (markPrice - avgE)
+        : 0;
+    const totalPnl = agg.profitFromSellsUsdt + unrealRt;
+
+    const now = new Date();
+    const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const profitDay = this.profitForPeriod(spotAscRows, dayAgo);
+    const profit3d = this.profitForPeriod(spotAscRows, threeDaysAgo);
+    const profitWeek = this.profitForPeriod(spotAscRows, weekAgo);
+
+    const fmtPnl = (v: number) => `${v >= 0 ? '+' : ''}${fmtQ(v)}`;
+
     out.push('');
-    out.push(telegramStatsBoxTop('📡 РЫНОК'));
+    out.push(telegramStatsBoxTop('💰 ПРИБЫЛЬ'));
+    out.push(telegramStatsBoxBlank());
+    {
+      let totalLine = `💎 Всего: ${fmtPnl(totalPnl)} ${quoteAsset}`;
+      if (equityBaseline != null && equityBaseline > 0) {
+        const pct = (totalPnl / equityBaseline) * 100;
+        totalLine += ` (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
+      }
+      out.push(telegramStatsLine(totalLine));
+    }
+    out.push(
+      telegramStatsLine(`📅 За день:   ${fmtPnl(profitDay)} ${quoteAsset}`),
+    );
+    out.push(
+      telegramStatsLine(`📅 За 3 дня:  ${fmtPnl(profit3d)} ${quoteAsset}`),
+    );
+    out.push(
+      telegramStatsLine(`📅 За неделю: ${fmtPnl(profitWeek)} ${quoteAsset}`),
+    );
+    out.push(telegramStatsBoxBottom());
+
+    // ── 3. СИГНАЛ РЫНКА ──
+    try {
+      const signal = await this.computeMarketEntrySignal();
+      const verdictRu =
+        signal.verdict === 'DA'
+          ? '✅ ДА'
+          : signal.verdict === 'OSTOROZHNO'
+            ? '⚠️ ОСТОРОЖНО'
+            : '🚫 НЕТ';
+      out.push('');
+      out.push(telegramStatsBoxTop('📡 СИГНАЛ РЫНКА'));
+      out.push(
+        telegramStatsLine(`Входить: ${verdictRu} (${signal.score}/100)`),
+      );
+      out.push(
+        telegramStatsLine(
+          `Тренд: 24h ${signal.trend24h.changePct >= 0 ? '+' : ''}${signal.trend24h.changePct.toFixed(1)}% / 7d ${signal.trend7d.changePct >= 0 ? '+' : ''}${signal.trend7d.changePct.toFixed(1)}%`,
+        ),
+      );
+      out.push(
+        telegramStatsLine(
+          `σ: ${signal.volatility.stdev.toFixed(2)} (${signal.volatility.label}) · WR: ${signal.winRate.rate.toFixed(0)}%`,
+        ),
+      );
+      out.push(telegramStatsBoxBottom());
+    } catch {
+      /* signal block is optional */
+    }
+
+    // ── 4. РЫНОК ──
+    out.push('');
+    out.push(telegramStatsBoxTop('📈 РЫНОК'));
     out.push(telegramStatsBoxBlank());
     if (tick24.ok) {
       const ch = tick24.priceChangePercent;
@@ -1473,11 +1506,6 @@ export class SimulationService {
       out.push(
         telegramStatsLine(`📈 Макс. 24ч:   ${fmtQ(tick24.highPrice, 2)}`),
       );
-      out.push(
-        telegramStatsLine(
-          `📊 Объём 24ч:   ${fmtVolumeShort(tick24.volume, baseAsset)}`,
-        ),
-      );
     } else {
       out.push(telegramStatsLine(`⚠️ Тикер 24ч: ${tick24.error}`));
       if (Number.isFinite(markPrice) && markPrice > 0) {
@@ -1488,114 +1516,48 @@ export class SimulationService {
         );
       }
     }
-    out.push(telegramStatsBoxBlank());
-    out.push(telegramStatsLine(`🔗 P2P курс:    ${asset}/${fiat}`));
-    out.push(
-      telegramStatsLine(`🕐 Обновлено:   ${fmtStatsDateTime(new Date())}`),
-    );
     out.push(telegramStatsBoxBottom());
-    out.push('');
 
-    out.push(telegramStatsBoxTop('🎯 АКТИВНАЯ ПОЗИЦИЯ'));
+    // ── 5. ПОЗИЦИЯ ──
+    out.push('');
+    out.push(telegramStatsBoxTop('🎯 ПОЗИЦИЯ'));
     out.push(telegramStatsBoxBlank());
     if (!hasKeys || !balLive?.ok) {
-      out.push(
-        telegramStatsLine(
-          '— нет доступа к балансу API — позицию на бирже не сверяем —',
-        ),
-      );
+      out.push(telegramStatsLine('— нет доступа к балансу API —'));
     } else if (spotStrategy === 'roundtrip') {
       const m = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : NaN;
       const bRow = balLive.balances.find((b) => b.asset === baseAsset);
-      const qRow = balLive.balances.find((b) => b.asset === quoteAsset);
       const baseFreeForRoundtrip = bRow ? parseFloat(bRow.free) : 0;
-      const quoteTot =
-        (qRow ? parseFloat(qRow.free) + parseFloat(qRow.locked) : 0) || 0;
-      const baseTot =
-        (bRow ? parseFloat(bRow.free) + parseFloat(bRow.locked) : 0) || 0;
-      let equityForPct = NaN;
-      if (Number.isFinite(m) && m > 0) {
-        equityForPct = quoteTot + baseTot * m;
-      }
       if (tracked > 0 && avgE > 0) {
         const tpTh = avgE * (1 + effectiveTpPct / 100);
         const slTh = slPct > 0 ? avgE * (1 - slPct / 100) : NaN;
         const invested = tracked * avgE;
         const unreal = Number.isFinite(m) ? tracked * (m - avgE) : NaN;
         const unrealPct = Number.isFinite(m) ? ((m - avgE) / avgE) * 100 : NaN;
-        const posPct =
-          Number.isFinite(equityForPct) && equityForPct > 0
-            ? (invested / equityForPct) * 100
-            : NaN;
         out.push(
           telegramStatsLine(
-            `📥 Вход:      ${fmtStatsQtyBase(tracked)} ${baseAsset} @ ${fmtQ(avgE, 2)}`,
+            `📥 Вход: ${fmtStatsQtyBase(tracked)} ${baseAsset} @ ${fmtQ(avgE, 2)}`,
           ),
         );
         out.push(
-          telegramStatsLine(`💰 Вложено:   ${fmtQ(invested)} ${quoteAsset}`),
+          telegramStatsLine(`💰 Вложено: ${fmtQ(invested)} ${quoteAsset}`),
         );
-        if (Number.isFinite(posPct)) {
+        if (Number.isFinite(unreal) && Number.isFinite(unrealPct)) {
           out.push(
             telegramStatsLine(
-              `📏 Размер:    ~${fmtStatsNumber(posPct, 1, 2)}% от портфеля`,
+              `💹 P&L: ${fmtPnl(unreal)} ${quoteAsset} (${unrealPct >= 0 ? '+' : ''}${fmtStatsNumber(unrealPct, 2, 2)}%)`,
             ),
           );
         }
-        out.push(telegramStatsBoxBlank());
-        out.push(telegramStatsLine('── Цели ──────────────────'));
+        out.push(telegramStatsInnerHr());
         out.push(
           telegramStatsLine(
-            `🟢 Тейк:      ≥ ${fmtQ(tpTh, 2)} (+${effectiveTpPct}%)`,
+            `🟢 Тейк: ≥ ${fmtQ(tpTh, 2)} (+${effectiveTpPct}%)`,
           ),
         );
         if (slPct > 0 && Number.isFinite(slTh)) {
           out.push(
-            telegramStatsLine(`🔴 Стоп:      ≤ ${fmtQ(slTh, 2)} (−${slPct}%)`),
-          );
-        } else {
-          out.push(telegramStatsLine('🔴 Стоп:      — (выкл.)'));
-        }
-        out.push(
-          telegramStatsLine(`🔵 Докупка:   до ${maxQuote} ${quoteAsset}`),
-        );
-        out.push(
-          telegramStatsLine(
-            maxPosRoundtrip > 0
-              ? `📦 Лимит поз.: ~${maxPosRoundtrip} ${quoteAsset}`
-              : `📦 Лимит поз.: —`,
-          ),
-        );
-        if (rtAccumulate) {
-          out.push(telegramStatsLine('➕ Докупки по сигналу: включены'));
-        }
-        out.push(telegramStatsBoxBlank());
-        out.push(telegramStatsLine('── Текущее состояние ─────'));
-        if (Number.isFinite(unreal) && Number.isFinite(unrealPct)) {
-          out.push(
-            telegramStatsLine(
-              `💹 Нереализ.:  ${unreal >= 0 ? '+' : ''}${fmtQ(unreal)} ${quoteAsset} (${unrealPct >= 0 ? '+' : ''}${fmtStatsNumber(unrealPct, 2, 2)}%)`,
-            ),
-          );
-        }
-        const toTpPct =
-          Number.isFinite(m) && m > 0 ? ((tpTh - m) / m) * 100 : Number.NaN;
-        const distTpUsdt =
-          Number.isFinite(m) && m > 0 ? tracked * Math.max(0, tpTh - m) : NaN;
-        if (Number.isFinite(distTpUsdt) && Number.isFinite(toTpPct)) {
-          out.push(
-            telegramStatsLine(
-              `📍 До тейка:   ${fmtQ(distTpUsdt)} ${quoteAsset} (${toTpPct >= 0 ? '+' : ''}${fmtStatsNumber(toTpPct, 2, 2)}%)`,
-            ),
-          );
-        }
-        if (slPct > 0 && Number.isFinite(m) && m > 0 && Number.isFinite(slTh)) {
-          const toSlPct = ((m - slTh) / m) * 100;
-          const distSlUsdt = tracked * Math.max(0, m - slTh);
-          out.push(
-            telegramStatsLine(
-              `📍 До стопа:   ${fmtQ(distSlUsdt)} ${quoteAsset} (−${fmtStatsNumber(toSlPct, 2, 2)}%)`,
-            ),
+            telegramStatsLine(`🔴 Стоп: ≤ ${fmtQ(slTh, 2)} (−${slPct}%)`),
           );
         }
         if (emPctRt > 0 && peak > 0) {
@@ -1606,14 +1568,12 @@ export class SimulationService {
           );
         }
         out.push(telegramStatsBoxBlank());
-        let status = '⏳ Статус: ожидание...';
+        let status = '⏳ Ожидание...';
         if (Number.isFinite(m) && m > 0) {
-          if (m >= tpTh) status = '⏳ Статус: в зоне тейка';
-          else if (slPct > 0 && Number.isFinite(slTh) && m <= slTh) {
-            status = '⏳ Статус: зона стопа';
-          } else {
-            status = '⏳ Статус: ожидание тейка...';
-          }
+          if (m >= tpTh) status = '✅ В зоне тейка';
+          else if (slPct > 0 && Number.isFinite(slTh) && m <= slTh)
+            status = '🔴 Зона стопа';
+          else status = '⏳ Ожидание тейка...';
         }
         out.push(telegramStatsLine(status));
       } else {
@@ -1622,174 +1582,49 @@ export class SimulationService {
           : 'марк —';
         out.push(
           telegramStatsLine(
-            `📍 Нет позиции бота · своб. ${baseAsset}: ${fmtStatsQtyBase(baseFreeForRoundtrip)} · ${mk}`,
+            `📍 Нет позиции · ${baseAsset}: ${fmtStatsQtyBase(baseFreeForRoundtrip)} · ${mk}`,
           ),
         );
       }
     } else {
       out.push(
         telegramStatsLine(
-          `⚙️ Стратегия: ${spotSide} · до ${maxQuote} ${quoteAsset}/ордер (без roundtrip)`,
+          `⚙️ ${spotSide} · до ${maxQuote} ${quoteAsset}/ордер`,
         ),
       );
     }
     out.push(telegramStatsBoxBottom());
-    out.push('');
 
-    const detail = this.computeSpotTradeAnalyticsFromRows(spotAscRows);
-    const agg = detail.agg;
-    const unrealRt =
-      spotStrategy === 'roundtrip' &&
-      tracked > 0 &&
-      avgE > 0 &&
-      Number.isFinite(markPrice)
-        ? tracked * (markPrice - avgE)
-        : 0;
-    const totalPnl = agg.profitFromSellsUsdt + unrealRt;
+    // ── 6. СТАТИСТИКА ──
     const denom = detail.streakDenom;
     const winRate = denom > 0 ? (detail.winningSells / denom) * 100 : 0;
     const lossRate = denom > 0 ? (detail.losingSells / denom) * 100 : 0;
-    const avgSellPnl =
-      agg.sellCount > 0 ? agg.profitFromSellsUsdt / agg.sellCount : null;
-
-    out.push(telegramStatsBoxTop('📈 ТОРГОВАЯ СТАТИСТИКА'));
-    out.push(telegramStatsBoxBlank());
-    out.push(telegramStatsLine('── Общее ─────────────────'));
-    out.push(
-      telegramStatsLine(`🔄 Всего сделок:   ${agg.buyCount + agg.sellCount}`),
-    );
-    out.push(
-      telegramStatsLine(
-        `📥 Покупок:         ${agg.buyCount} (${fmtQ(agg.buyUsdt)} ${quoteAsset})`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        `📤 Продаж:          ${agg.sellCount} (${fmtQ(agg.sellUsdt)} ${quoteAsset})`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        `✅ Прибыльных:      ${detail.winningSells} (${fmtStatsNumber(winRate, 0, 0)}%)`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        `❌ Убыточных:       ${detail.losingSells} (${fmtStatsNumber(lossRate, 0, 0)}%)`,
-      ),
-    );
-    out.push(telegramStatsBoxBlank());
-    out.push(telegramStatsLine('── Прибыль ───────────────'));
-    out.push(
-      telegramStatsLine(
-        `💰 Реализовано:    ${agg.profitFromSellsUsdt >= 0 ? '+' : ''}${fmtQ(agg.profitFromSellsUsdt)} ${quoteAsset}`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        `📊 Нереализовано:  ${unrealRt >= 0 ? '+' : ''}${fmtQ(unrealRt)} ${quoteAsset}`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        `💎 Общий P&L:     ${totalPnl >= 0 ? '+' : ''}${fmtQ(totalPnl)} ${quoteAsset}`,
-      ),
-    );
-    out.push(telegramStatsBoxBlank());
-    out.push(telegramStatsLine('── Средние ───────────────'));
-    out.push(
-      telegramStatsLine(
-        detail.avgBuyPrice != null
-          ? `📏 Ср. покупка:    ${fmtQ(detail.avgBuyPrice, 2)} ${quoteAsset}/${baseAsset}`
-          : `📏 Ср. покупка:    —`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        detail.avgSellPrice != null
-          ? `📏 Ср. продажа:   ${fmtQ(detail.avgSellPrice, 2)} ${quoteAsset}/${baseAsset}`
-          : `📏 Ср. продажа:   —`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        avgSellPnl != null && Number.isFinite(avgSellPnl)
-          ? `📏 Ср. прибыль:   ${avgSellPnl >= 0 ? '+' : ''}${fmtQ(avgSellPnl)} ${quoteAsset}`
-          : `📏 Ср. прибыль:   —`,
-      ),
-    );
-    out.push(
-      telegramStatsLine(
-        detail.avgHoldMs != null
-          ? `⏱ Ср. время сделки: ${fmtDurationShort(detail.avgHoldMs)}`
-          : `⏱ Ср. время сделки: —`,
-      ),
-    );
-    out.push(telegramStatsBoxBlank());
-    out.push(telegramStatsLine('── Рекорды ───────────────'));
-    const bestStr =
-      detail.bestPnl != null
-        ? `${detail.bestPnl >= 0 ? '+' : ''}${fmtQ(detail.bestPnl)} ${quoteAsset}${detail.bestPct != null ? ` (${detail.bestPct >= 0 ? '+' : ''}${fmtStatsNumber(detail.bestPct, 2, 2)}%)` : ''}`
-        : '—';
-    out.push(telegramStatsLine(`🏆 Лучшая:  ${bestStr}`));
-    if (detail.losingSells === 0) {
-      out.push(telegramStatsLine('💀 Худшая:  — нет убыточных —'));
-    } else if (detail.worstPnl != null) {
-      const w = detail.worstPnl;
-      const wp =
-        detail.worstPct != null
-          ? ` (${w >= 0 ? '+' : ''}${fmtStatsNumber(detail.worstPct, 2, 2)}%)`
-          : '';
-      out.push(
-        telegramStatsLine(
-          `💀 Худшая:  ${w >= 0 ? '+' : ''}${fmtQ(w)} ${quoteAsset}${wp}`,
-        ),
-      );
-    } else {
-      out.push(telegramStatsLine('💀 Худшая:  —'));
-    }
     const streakLine =
       detail.streakCount > 0 && detail.streakKind === 'win'
         ? `${detail.streakCount} 🟢 подряд`
         : detail.streakCount > 0 && detail.streakKind === 'loss'
           ? `${detail.streakCount} 🔴 подряд`
           : '—';
-    out.push(telegramStatsLine(`📈 Серия:   ${streakLine}`));
-    out.push(telegramStatsBoxBottom());
-
-    try {
-      const signal = await this.computeMarketEntrySignal();
-      const verdictRu =
-        signal.verdict === 'DA'
-          ? '✅ ДА'
-          : signal.verdict === 'OSTOROZHNO'
-            ? '⚠️ ОСТОРОЖНО'
-            : '🚫 НЕТ';
-      out.push('');
-      out.push(telegramStatsBoxTop('📡 СИГНАЛ РЫНКА'));
-      out.push(
-        telegramStatsLine(`Входить: ${verdictRu} (${signal.score}/100)`),
-      );
-      out.push(
-        telegramStatsLine(
-          `24h: ${signal.trend24h.changePct >= 0 ? '+' : ''}${signal.trend24h.changePct.toFixed(1)}% · 7d: ${signal.trend7d.changePct >= 0 ? '+' : ''}${signal.trend7d.changePct.toFixed(1)}%`,
-        ),
-      );
-      out.push(
-        telegramStatsLine(
-          `σ: ${signal.volatility.stdev.toFixed(2)} (${signal.volatility.label}) · WR: ${signal.winRate.rate.toFixed(0)}%`,
-        ),
-      );
-      out.push(telegramStatsBoxBottom());
-    } catch {
-      /* signal block is optional */
-    }
 
     out.push('');
-    out.push(`⚙️ Бот работает: ${fmtUptimeProcess(process.uptime())}`);
+    out.push(telegramStatsBoxTop('📊 СТАТИСТИКА'));
+    out.push(telegramStatsBoxBlank());
     out.push(
-      `🔄 Следующая проверка через ${fmtAutotradeIntervalRu(intervalMs)}`,
+      telegramStatsLine(
+        `🔄 Сделок: ${agg.buyCount + agg.sellCount} (${agg.buyCount} покупок, ${agg.sellCount} продаж)`,
+      ),
     );
+    out.push(
+      telegramStatsLine(
+        `✅ Прибыльных: ${detail.winningSells} (${fmtStatsNumber(winRate, 0, 0)}%) · ❌ Убыт.: ${detail.losingSells} (${fmtStatsNumber(lossRate, 0, 0)}%)`,
+      ),
+    );
+    out.push(telegramStatsLine(`📈 Серия: ${streakLine}`));
+    out.push(telegramStatsBoxBottom());
+
+    // ── 7. Футер ──
+    out.push('');
+    out.push(`⚙️ Бот работает: ${fmtUptimeProcess(process.uptime())}`);
 
     return out.join('\n');
   }
@@ -1836,6 +1671,23 @@ export class SimulationService {
     profitFromSellsUsdt: number;
   }> {
     return this.aggregateSpotExecStats();
+  }
+
+  private profitForPeriod(
+    rows: Array<{ createdAt: Date; payload: unknown }>,
+    since: Date,
+  ): number {
+    let sum = 0;
+    for (const r of rows) {
+      if (r.createdAt < since) continue;
+      const p = r.payload as SpotLivePayload | null;
+      if (p?.spot?.side !== 'SELL') continue;
+      const est = p.roundtrip?.realizedPnlUsdtEstimate;
+      if (est != null && typeof est === 'number' && Number.isFinite(est)) {
+        sum += est;
+      }
+    }
+    return sum;
   }
 
   private async loadSpotExecutedAsc(): Promise<
