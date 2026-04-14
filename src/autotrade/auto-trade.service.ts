@@ -24,6 +24,8 @@ import {
 
 const BOT_STATE_ID = 'default';
 const AUTOTRADE_SKIP_AUDIT_MS = 600_000;
+const BTN_STATS = '📊 Статистика';
+const BTN_AUTO_ON = '▶️ Включить автоторговлю';
 
 @Injectable()
 export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
@@ -335,15 +337,31 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       '',
       'Команды бота снова в обычном режиме. Когда будете готовы, включите автоторговлю сами.',
     ].join('\n');
-    await this.sendTelegram(chatId, text);
+    await this.sendTelegram(chatId, text, {
+      keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
+      resize_keyboard: true,
+      is_persistent: true,
+    });
   }
 
-  private async sendTelegram(chatId: string, text: string) {
+  private async sendTelegram(
+    chatId: string,
+    text: string,
+    replyMarkup?: {
+      keyboard: Array<Array<{ text: string }>>;
+      resize_keyboard?: boolean;
+      is_persistent?: boolean;
+    },
+  ) {
     const token = this.config.get<string>('telegramBotToken');
     if (!token) return;
     await axios.post(
       `https://api.telegram.org/bot${token}/sendMessage`,
-      { chat_id: chatId, text },
+      {
+        chat_id: chatId,
+        text,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      },
       { timeout: 15_000 },
     );
   }
