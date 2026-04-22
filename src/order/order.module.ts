@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AiModule } from '../ai/ai.module';
 import { BinanceModule } from '../binance/binance.module';
 import { MarketModule } from '../market/market.module';
 import { RiskModule } from '../risk/risk.module';
@@ -15,6 +16,7 @@ import { TradeExportService } from './trade-export.service';
     RiskModule,
     BinanceModule,
     MarketModule,
+    AiModule,
   ],
   providers: [OrderIntentService, SimulationService, TradeExportService],
   exports: [OrderIntentService, SimulationService, TradeExportService],

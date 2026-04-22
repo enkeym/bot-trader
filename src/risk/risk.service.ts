@@ -15,11 +15,6 @@ export interface AutotradeCircuitBlocked {
   reason: AutotradeCircuitReason;
 }
 
-export interface RiskCheckInput {
-  grossSpreadPercent: number;
-  notionalUsdt: number;
-}
-
 /** Payload фрагмент для подсчёта дневного убытка по SELL Spot */
 type SpotPayloadForLoss = {
   roundtrip?: { realizedPnlUsdtEstimate?: number | null };
@@ -42,12 +37,8 @@ export class RiskService {
     private readonly binanceSpot: BinanceSpotService,
   ) {}
 
-  get minSpreadPercent(): number {
-    return this.config.get<number>('strategy.minSpreadPercent') ?? 0.15;
-  }
-
   get maxNotionalUsdt(): number {
-    return this.config.get<number>('strategy.maxNotionalUsdt') ?? 500;
+    return this.config.get<number>('strategy.maxNotionalUsdt') ?? 20;
   }
 
   get dailyMaxLossUsdt(): number {
@@ -56,6 +47,32 @@ export class RiskService {
 
   get maxDailySpotTrades(): number {
     return this.config.get<number>('strategy.maxDailySpotTrades') ?? 0;
+  }
+
+  get minOrderNotionalUsdt(): number {
+    return this.config.get<number>('strategy.minOrderNotionalUsdt') ?? 10;
+  }
+
+  /**
+   * Размер ордера по риску: риск = RISK% от equity, делённый на SL% расстояние.
+   * Ограничивается сверху maxNotionalUsdt.
+   */
+  riskBasedNotional(params: { equityUsdt: number; slPercent: number }): number {
+    const { equityUsdt, slPercent } = params;
+    const riskPct =
+      this.config.get<number>('strategy.riskPerTradePercent') ?? 1;
+    if (
+      !(equityUsdt > 0) ||
+      !(slPercent > 0) ||
+      !(riskPct > 0) ||
+      !Number.isFinite(equityUsdt) ||
+      !Number.isFinite(slPercent)
+    ) {
+      return 0;
+    }
+    const riskUsdt = (equityUsdt * riskPct) / 100;
+    const raw = riskUsdt / (slPercent / 100);
+    return Math.min(raw, this.maxNotionalUsdt);
   }
 
   private getTradingWindowParsed() {
@@ -68,17 +85,6 @@ export class RiskService {
     return parseTradingDaysUtc(raw);
   }
 
-  /**
-   * Разрешить сигнал (до банковского шага).
-   * Дневной стоп по реализованному убытку Spot — в `checkAutotradeScheduleAndDailyLimits`.
-   */
-  allowSignal(input: RiskCheckInput): boolean {
-    if (input.grossSpreadPercent < this.minSpreadPercent) return false;
-    if (input.notionalUsdt > this.maxNotionalUsdt) return false;
-    return true;
-  }
-
-  /** Только UTC-расписание (без БД). */
   isWithinAutotradeTradingSchedule(now: Date = new Date()): boolean {
     return isWithinTradingScheduleUtc(
       now,
@@ -87,10 +93,6 @@ export class RiskService {
     );
   }
 
-  /**
-   * Лимиты по БД: число исполненных Spot за сутки UTC и сумма отрицательных
-   * `realizedPnlUsdtEstimate` на SELL (roundtrip).
-   */
   async checkAutotradeDailyLimits(
     now: Date = new Date(),
   ): Promise<
@@ -141,20 +143,12 @@ export class RiskService {
     return { ok: true };
   }
 
-  /**
-   * Только просадка эквити от baseline (серия убыточных SELL обрабатывается
-   * в AutoTradeService: выключение флага автоторговли).
-   */
-  async checkAutotradeCircuitBreakers(
-    _now: Date = new Date(),
-  ): Promise<{ ok: true } | AutotradeCircuitBlocked> {
+  async checkAutotradeCircuitBreakers(): Promise<
+    { ok: true } | AutotradeCircuitBlocked
+  > {
     return this.checkEquityDrawdownVsBaseline();
   }
 
-  /**
-   * Последние N исполненных Spot SELL с отрицательным realizedPnlUsdtEstimate подряд.
-   * `MAX_CONSECUTIVE_LOSS_SELLS=0` — всегда false.
-   */
   async hasConsecutiveLossStreak(): Promise<boolean> {
     const n = this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
     if (!(n > 0)) return false;

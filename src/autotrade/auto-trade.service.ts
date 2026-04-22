@@ -6,21 +6,20 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import { BinanceSpotService } from '../binance/binance-spot.service';
 import { AuditService } from '../audit/audit.service';
+import { parseSpotExchangeFill } from '../order/balance-telegram.format';
 import {
-  SpotLivePayload,
   SimulationService,
+  SimulationTickResult,
+  SpotLivePayload,
 } from '../order/simulation.service';
 import {
-  formatSpotBalanceShortLines,
-  parseSpotExchangeFill,
-} from '../order/balance-telegram.format';
+  exitKindShort,
+  fmtStatsNumber,
+  fmtStatsQtyBase,
+} from '../order/telegram-trading-report.format';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  AutotradeCircuitBlocked,
-  RiskService,
-} from '../risk/risk.service';
+import { AutotradeCircuitBlocked, RiskService } from '../risk/risk.service';
 
 const BOT_STATE_ID = 'default';
 const AUTOTRADE_SKIP_AUDIT_MS = 600_000;
@@ -31,25 +30,19 @@ const BTN_AUTO_ON = '▶️ Включить автоторговлю';
 export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AutoTradeService.name);
   private intervalRef: ReturnType<typeof setInterval> | null = null;
+  private inFlight = false;
   private lastScheduleSkipAuditAt = 0;
   private lastDailyLimitAuditAt = 0;
   private lastCircuitAuditAt = 0;
-  /** Дубли Telegram по одному эпизоду просадки эквити */
   private lastCircuitTelegramNotifyKey = '';
-  /**
-   * Временная пауза после серии убыточных SELL (вместо полной остановки).
-   * Если LOSS_STREAK_COOLDOWN_MS > 0, бот паузится на это время и автовозобновляется.
-   * Если 0 — старое поведение (полная остановка).
-   */
   private lossStreakPauseUntil = 0;
-  private consecutiveLossAutoOffLatched = false;
+  private lossStreakPausedAt = 0;
 
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly simulation: SimulationService,
     private readonly audit: AuditService,
-    private readonly binanceSpot: BinanceSpotService,
     private readonly risk: RiskService,
   ) {}
 
@@ -62,10 +55,7 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     const ms = this.config.get<number>('autoTrade.intervalMs') ?? 180_000;
     this.intervalRef = setInterval(() => void this.tick(), ms);
     this.logger.log(
-      `Auto-trade tick каждые ${ms} ms — Spot MARKET при сигнале (` +
-        (this.config.get<string>('binance.spotBaseUrl') ??
-          'https://api.binance.com') +
-        ')',
+      `Auto-trade tick каждые ${ms} ms · ${this.config.get<string>('binance.spotBaseUrl') ?? 'https://api.binance.com'}`,
     );
   }
 
@@ -93,6 +83,19 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async tick() {
+    if (this.inFlight) {
+      this.logger.warn('tick: предыдущий вызов ещё в процессе, пропуск');
+      return;
+    }
+    this.inFlight = true;
+    try {
+      await this.runTick();
+    } finally {
+      this.inFlight = false;
+    }
+  }
+
+  private async runTick() {
     let enabled = false;
     try {
       const st = await this.getState();
@@ -105,103 +108,79 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
 
     const now = new Date();
     if (!this.risk.isWithinAutotradeTradingSchedule(now)) {
-      const t = Date.now();
-      if (t - this.lastScheduleSkipAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
-        this.lastScheduleSkipAuditAt = t;
-        void this.audit.log('info', 'autotrade_skipped_trading_schedule', {
+      this.maybeAudit('lastScheduleSkipAuditAt', () =>
+        this.audit.log('info', 'autotrade_skipped_trading_schedule', {
           utc: now.toISOString(),
-        });
-      }
+        }),
+      );
       return;
     }
 
     const daily = await this.risk.checkAutotradeDailyLimits(now);
     if (!daily.ok) {
-      const t = Date.now();
-      if (t - this.lastDailyLimitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
-        this.lastDailyLimitAuditAt = t;
-        void this.audit.log('info', 'autotrade_skipped_daily_limit', {
+      this.maybeAudit('lastDailyLimitAuditAt', () =>
+        this.audit.log('info', 'autotrade_skipped_daily_limit', {
           reason: daily.reason,
           utc: now.toISOString(),
-        });
-      }
+        }),
+      );
       return;
     }
 
     if (Date.now() < this.lossStreakPauseUntil) {
-      const t = Date.now();
-      if (t - this.lastDailyLimitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
-        this.lastDailyLimitAuditAt = t;
-        void this.audit.log('info', 'autotrade_skipped_loss_streak_pause', {
-          utc: now.toISOString(),
+      this.maybeAudit('lastDailyLimitAuditAt', () =>
+        this.audit.log('info', 'autotrade_paused_loss_streak_tick', {
           resumeAt: new Date(this.lossStreakPauseUntil).toISOString(),
-        });
-      }
+        }),
+      );
       return;
     }
 
     const lossStreak = await this.risk.hasConsecutiveLossStreak();
-    if (!lossStreak) {
-      this.consecutiveLossAutoOffLatched = false;
-    } else if (!this.consecutiveLossAutoOffLatched) {
-      this.consecutiveLossAutoOffLatched = true;
+    if (lossStreak && Date.now() >= this.lossStreakPauseUntil) {
       const n =
         this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
       const cooldownMs =
         this.config.get<number>('strategy.lossStreakCooldownMs') ?? 0;
-
-      if (cooldownMs > 0) {
-        this.lossStreakPauseUntil = Date.now() + cooldownMs;
+      const effectiveCooldown = cooldownMs > 0 ? cooldownMs : 30 * 60_000;
+      if (this.lossStreakPausedAt + effectiveCooldown * 2 < Date.now()) {
+        this.lossStreakPauseUntil = Date.now() + effectiveCooldown;
+        this.lossStreakPausedAt = Date.now();
         void this.audit.log('info', 'autotrade_paused_loss_streak', {
-          utc: now.toISOString(),
           maxConsecutiveLossSells: n,
-          cooldownMs,
+          cooldownMs: effectiveCooldown,
           resumeAt: new Date(this.lossStreakPauseUntil).toISOString(),
         });
-        void this.notifyAutotradeDisabledByLossStreak(n, cooldownMs);
-        return;
+        void this.notifyLossStreakPause(n, effectiveCooldown);
       }
-
-      await this.setEnabled(false);
-      void this.audit.log('info', 'autotrade_disabled_consecutive_loss_sells', {
-        utc: now.toISOString(),
-        maxConsecutiveLossSells: n,
-      });
-      void this.notifyAutotradeDisabledByLossStreak(n, 0);
       return;
     }
 
-    const circuit = await this.risk.checkAutotradeCircuitBreakers(now);
+    const circuit = await this.risk.checkAutotradeCircuitBreakers();
     if (!circuit.ok) {
-      const notifyKey = `equity:${circuit.reason}`;
-      if (notifyKey !== this.lastCircuitTelegramNotifyKey) {
-        this.lastCircuitTelegramNotifyKey = notifyKey;
-        void this.notifyUserCircuitBlocked(circuit);
+      const key = `equity:${circuit.reason}`;
+      if (key !== this.lastCircuitTelegramNotifyKey) {
+        this.lastCircuitTelegramNotifyKey = key;
+        void this.notifyCircuitBlocked(circuit);
       }
-      const t = Date.now();
-      if (t - this.lastCircuitAuditAt >= AUTOTRADE_SKIP_AUDIT_MS) {
-        this.lastCircuitAuditAt = t;
-        void this.audit.log('info', 'autotrade_skipped_circuit', {
+      this.maybeAudit('lastCircuitAuditAt', () =>
+        this.audit.log('info', 'autotrade_skipped_circuit', {
           reason: circuit.reason,
-          utc: now.toISOString(),
-        });
-      }
+        }),
+      );
       return;
     }
-
     this.lastCircuitTelegramNotifyKey = '';
 
     const maxNotional =
-      this.config.get<number>('strategy.maxNotionalUsdt') ?? 500;
+      this.config.get<number>('strategy.maxNotionalUsdt') ?? 20;
 
     try {
       const res = await this.simulation.runPairSimulation(maxNotional);
       if (!res.ok || !res.orderCreated || !res.order) return;
-
       const chatId = await this.resolveNotifyChatId();
       if (!chatId) return;
-
-      const text = await this.buildTradeNotification(res);
+      const text = this.buildTradeNotification(res);
       await this.sendTelegram(chatId, text);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -209,126 +188,58 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async buildTradeNotification(
-    res: Awaited<ReturnType<SimulationService['runPairSimulation']>>,
-  ): Promise<string> {
+  private maybeAudit(
+    key:
+      | 'lastScheduleSkipAuditAt'
+      | 'lastDailyLimitAuditAt'
+      | 'lastCircuitAuditAt',
+    fn: () => void | Promise<unknown>,
+  ) {
+    const t = Date.now();
+    if (t - this[key] >= AUTOTRADE_SKIP_AUDIT_MS) {
+      this[key] = t;
+      void fn();
+    }
+  }
+
+  private buildTradeNotification(res: SimulationTickResult): string {
     const o = res.order;
     if (!o) return '';
-
-    const spotSym = this.config.get<string>('binance.spotSymbol') ?? 'SOLUSDT';
-    const pairFil = await this.binanceSpot.getLotSizeFilter(spotSym);
-    const baseAsset = pairFil.ok
-      ? pairFil.baseAsset
-      : spotSym.replace(/USDT$|BUSD$|FDUSD$/, '') || 'SOL';
-    const quoteAsset = pairFil.ok ? pairFil.quoteAsset : 'USDT';
-
     const pl = o.payload as SpotLivePayload | null;
+    const testnetPrefix = res.isTestnet ? '⚠️ TESTNET\n' : '';
+
     if (o.status === 'FAILED') {
-      return [
-        '⚠️ Ордер не исполнен',
-        `📊 Пара: ${pl?.spot?.symbol ?? spotSym}`,
-        `❗ ${pl?.error ?? 'ошибка'}`,
-      ].join('\n');
+      return `${testnetPrefix}⚠️ ${pl?.error ?? 'ошибка'}`;
     }
 
     const ex = pl?.exchangeResponse ?? {};
     const { baseQty, quoteQty } = parseSpotExchangeFill(ex);
     const side = pl?.spot?.side;
-    const rtp = pl?.roundtrip?.realizedPnlUsdtEstimate;
-    const exitKind = pl?.roundtrip?.exitKind;
+    const ba = pl?.spot?.baseAsset ?? 'SOL';
+    const bq = Number(baseQty);
+    const qq = Number(quoteQty);
+    const px = bq > 0 ? qq / bq : NaN;
 
-    const sym = pl?.spot?.symbol ?? spotSym;
-    const qa = pl?.spot?.quoteAsset ?? quoteAsset;
-    const ba = pl?.spot?.baseAsset ?? baseAsset;
-    const exitWhy =
-      exitKind === 'stop_loss'
-        ? 'Стоп-лосс: марк ниже порога от средней входа.'
-        : exitKind === 'emergency_drawdown'
-          ? 'Аварийный выход: просадка марка от пика по стратегии.'
-          : exitKind === 'take_profit'
-            ? 'Тейк-профит: марк выше порога от средней входа (не из-за стопа и не «аварийно»).'
-            : null;
-
-    const head: string[] = [];
-
-    if (
-      side === 'BUY' &&
-      Number.isFinite(baseQty) &&
-      Number.isFinite(quoteQty)
-    ) {
-      const bq = Number(baseQty);
-      const qq = Number(quoteQty);
-      const px = bq > 0 ? qq / bq : NaN;
-      head.push(
-        `🟢 Покупка ${sym}`,
-        `${bq.toFixed(8)} ${ba} по ~${Number.isFinite(px) ? px.toFixed(2) : '—'} ${qa} за 1 ${ba} · списано ${qq.toFixed(4)} ${qa}`,
-      );
-    } else if (
-      side === 'SELL' &&
-      Number.isFinite(baseQty) &&
-      Number.isFinite(quoteQty)
-    ) {
-      const bq = Number(baseQty);
-      const qq = Number(quoteQty);
-      const px = bq > 0 ? qq / bq : NaN;
-      if (exitKind === 'stop_loss') {
-        head.push('🛡 Срабатывание стоп-лосса (roundtrip)');
-      }
-      head.push(`🔴 Продажа ${sym}`);
-      if (exitWhy != null) {
-        head.push(exitWhy);
-      } else {
-        head.push('Тип выхода в payload не указан.');
-      }
-      head.push(
-        `${bq.toFixed(8)} ${ba} по ~${Number.isFinite(px) ? px.toFixed(2) : '—'} ${qa} за 1 ${ba} · выручка ${qq.toFixed(4)} ${qa}`,
-      );
+    if (side === 'BUY') {
+      return `${testnetPrefix}🟢 Купил ${fmtStatsQtyBase(bq)} ${ba} @ ${fmtStatsNumber(px, 2, 2)} (−${fmtStatsNumber(qq, 2, 2)}$)`;
+    }
+    if (side === 'SELL') {
+      const icon = exitKindShort(pl?.roundtrip?.exitKind);
+      const rtp = pl?.roundtrip?.realizedPnlUsdtEstimate;
+      let pnlStr = '';
       if (rtp != null && Number.isFinite(rtp)) {
-        const cost = qq - rtp;
-        const pct = cost > 0 ? ((rtp / cost) * 100).toFixed(2) : '—';
-        head.push(
-          `По учёту за партию: ${cost.toFixed(4)} ${qa} → ${rtp >= 0 ? '+' : ''}${rtp.toFixed(4)} ${qa}${pct !== '—' ? ` (${pct}% к входу)` : ''}`,
-        );
-      }
-    } else {
-      head.push(
-        '✅ Исполнено на бирже',
-        `📊 Пара: ${sym}`,
-        `ℹ️ ${side ?? '—'} — объём в ответе не распознан`,
-      );
-    }
-
-    const bal = await this.binanceSpot.getAccountBalances();
-    if (bal.ok) {
-      const qRow = bal.balances.find((b) => b.asset === qa);
-      const bRow = bal.balances.find((x) => x.asset === ba);
-      head.push('');
-      head.push('Баланс Spot:');
-      const balLines = formatSpotBalanceShortLines(qa, ba, qRow, bRow);
-      for (const line of balLines) {
-        head.push(line);
-      }
-    } else {
-      head.push('');
-      head.push(`Баланс: ${bal.error}`);
-    }
-
-    if (side === 'BUY' || side === 'SELL') {
-      try {
-        const agg = await this.simulation.getSpotExecutedAgg();
-        if (agg.sellCount > 0) {
-          const p = agg.profitFromSellsUsdt;
-          head.push('');
-          head.push(
-            `Всего реализ. по Spot (оценка бота): ${p >= 0 ? '+' : ''}${p.toFixed(4)} ${qa} (${agg.sellCount} продаж)`,
-          );
+        const proceeds = qq;
+        const cost = proceeds - rtp;
+        const pct = cost > 0 ? (rtp / cost) * 100 : NaN;
+        const sign = rtp >= 0 ? '+' : '';
+        pnlStr = ` ${sign}${fmtStatsNumber(rtp, 2, 2)}$`;
+        if (Number.isFinite(pct)) {
+          pnlStr += ` / ${sign}${fmtStatsNumber(pct, 2, 2)}%`;
         }
-      } catch {
-        /* ignore */
       }
+      return `${testnetPrefix}${icon} Продал ${fmtStatsQtyBase(bq)} ${ba} @ ${fmtStatsNumber(px, 2, 2)}${pnlStr}`;
     }
-
-    return head.join('\n');
+    return `${testnetPrefix}✅ Исполнено · ${side ?? '—'}`;
   }
 
   private async resolveNotifyChatId(): Promise<string | null> {
@@ -342,52 +253,22 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async notifyUserCircuitBlocked(_circuit: AutotradeCircuitBlocked) {
+  private async notifyCircuitBlocked(_circuit: AutotradeCircuitBlocked) {
+    void _circuit;
     const chatId = await this.resolveNotifyChatId();
     if (!chatId) return;
-
-    const body =
-      'Автоторговля на паузе (тик не торгует): просадка портфеля относительно STATS_EQUITY_BASELINE_USDT выше лимита AUTO_TRADE_MAX_EQUITY_DRAWDOWN_PERCENT. Можно выключить автоторговлю или изменить лимиты в .env.';
-
-    const text = ['⏸️ Блокировка автоторговли (просадка эквити)', '', body].join(
-      '\n',
-    );
-    await this.sendTelegram(chatId, text);
+    await this.sendTelegram(chatId, '⏸️ Пауза · просадка эквити ниже лимита');
   }
 
-  private async notifyAutotradeDisabledByLossStreak(
-    n: number,
-    cooldownMs: number,
-  ) {
+  private async notifyLossStreakPause(n: number, cooldownMs: number) {
     const chatId = await this.resolveNotifyChatId();
     if (!chatId) return;
-
-    if (cooldownMs > 0) {
-      const mins = Math.round(cooldownMs / 60_000);
-      const text = [
-        '⏸️ Автоторговля на паузе',
-        '',
-        `Подряд ${n} убыточных продаж Spot. Пауза на ${mins} мин, затем автовозобновление.`,
-      ].join('\n');
-      await this.sendTelegram(chatId, text, {
-        keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
-        resize_keyboard: true,
-        is_persistent: true,
-      });
-    } else {
-      const text = [
-        '⏹️ Автоторговля выключена',
-        '',
-        `Подряд ${n} убыточных продаж Spot (часто выходы по стоп-лоссу). Флаг autoTrade выставлен в ВЫКЛ.`,
-        '',
-        'Когда будете готовы, включите автоторговлю сами.',
-      ].join('\n');
-      await this.sendTelegram(chatId, text, {
-        keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
-        resize_keyboard: true,
-        is_persistent: true,
-      });
-    }
+    const mins = Math.round(cooldownMs / 60_000);
+    await this.sendTelegram(chatId, `⏸️ Пауза ${mins}м · ${n} убытков подряд`, {
+      keyboard: [[{ text: BTN_STATS }], [{ text: BTN_AUTO_ON }]],
+      resize_keyboard: true,
+      is_persistent: true,
+    });
   }
 
   private async sendTelegram(
@@ -401,14 +282,19 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   ) {
     const token = this.config.get<string>('telegramBotToken');
     if (!token) return;
-    await axios.post(
-      `https://api.telegram.org/bot${token}/sendMessage`,
-      {
-        chat_id: chatId,
-        text,
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      },
-      { timeout: 15_000 },
-    );
+    try {
+      await axios.post(
+        `https://api.telegram.org/bot${token}/sendMessage`,
+        {
+          chat_id: chatId,
+          text,
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+        },
+        { timeout: 15_000 },
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`telegram send: ${msg}`);
+    }
   }
 }

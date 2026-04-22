@@ -1,358 +1,150 @@
-# Trader — Telegram-бот (Binance P2P + TON Connect)
+# Trader — Spot-бот на Binance (ATR + Gemini)
 
-Сервер на **Node.js + NestJS + TypeScript**: мониторинг стакана **Binance P2P** (пара **USDT/fiat**, по умолчанию **USD** для доступности с VPS), расчёт спреда, **симуляция** сделок при `DRY_RUN=true`, уведомления и команды в **Telegram**, опционально **TON Connect** (манифест, ограничение доступа к командам). Данные — **PostgreSQL**, опционально **Redis** (кэш для антиспама алертов).
+Node.js + NestJS + TypeScript. Торгует **Spot SOL/USDT** по стратегии тренд-фолловинг с
+ATR-нормализованными SL/TP, подтверждением 4h и опциональной AI-проверкой через Gemini 1.5 Flash.
+Постгрес для учёта, опциональный Redis для антиспама Telegram.
 
-> **Важно.** Для **чтения** стакана P2P используется **публичный** API (без ключей). При `DRY_RUN=false` и заданных **API-ключах** с [Binance](https://www.binance.com) бот отправляет **Spot MARKET-ордера** на продакшен API (`api.binance.com`). Это **реальные** средства. P2P-сделки по API здесь **не** автоматизируются. Соблюдайте [правила Binance](https://www.binance.com/en/terms) и местное законодательство.
-
----
-
-## Содержание
-
-1. [Что умеет бот](#что-умеет-бот)
-2. [Бумажная симуляция прибыли](#бумажная-симуляция-прибыли)
-3. [Что нужно заранее](#что-нужно-заранее)
-4. [Установка и запуск (локально)](#установка-и-запуск-локально)
-5. [Получение токена Telegram-бота](#получение-токена-telegram-бота)
-6. [Ключи API Binance (опционально)](#ключи-api-binance-опционально)
-7. [PostgreSQL и миграции](#postgresql-и-миграции)
-8. [Redis (опционально)](#redis-опционально)
-9. [Переменные окружения (.env)](#переменные-окружения-env)
-10. [TON Connect и HTTPS](#ton-connect-и-https)
-11. [Алерты в Telegram (chat id)](#алерты-в-telegram-chat-id)
-12. [Команды бота](#команды-бота)
-13. [Продакшен](#продакшен)
-14. [Частые проблемы](#частые-проблемы)
-15. [Ограничения, расписание UTC и ручная пауза](#ограничения-расписание-utc-и-ручная-пауза)
-16. [Дополнительная документация](#дополнительная-документация)
+> При заданных `BINANCE_API_KEY` / `BINANCE_API_SECRET` бот шлёт **реальные** MARKET-ордера.
+> На [testnet.binance.vision](https://testnet.binance.vision) — безопасное окружение без реальных средств.
+> В сообщениях testnet-сделки помечены тегом `⚠️ TESTNET`.
 
 ---
 
-## Что умеет бот
+## Стратегия
 
-| Функция           | Описание                                                                                                                                  |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Мониторинг спреда | Запрос к публичному API Binance P2P, лучшие цены покупки/продажи USDT за выбранный фиат (`FIAT`), грубый и «чистый» спред (с учётом `P2P_TAKER_FEE_PERCENT`). |
-| Симуляция         | При прохождении риск-лимитов запись **идемпотентного** `OrderIntent` в БД (без реальной сделки на бирже при `DRY_RUN=true`).              |
-| Telegram          | `/start` — меню с кнопками (статистика; для админа — вкл/выкл автоторговли); уведомления о сделках; cron-алерты по спреду.                |
-| HTTP              | `GET /health` — проверка живости; `GET /tonconnect-manifest.json` — манифест TON Connect.                                                 |
+1. **Регим-фильтр (1h + 4h)** — [src/strategy/regime.service.ts](src/strategy/regime.service.ts):
+   - ADX(14) ≥ `ADX_MIN` (по умолчанию 20) — тренд существует.
+   - Цена 1h > EMA50 и 4h > EMA50 — тренд согласован.
+   - RSI(14) в коридоре `RSI_ENTRY_MIN..RSI_ENTRY_MAX` (40..65) — откат без перекупленности.
+   - Цена выше 4h swing low — не ловим «падающий нож».
+2. **ATR-стопы** — SL = `entry − ATR_SL_MULT × ATR14`, TP = `entry + ATR_TP_MULT × ATR14`.
+   Эффективный TP не ниже `2 × SPOT_TAKER_FEE_PERCENT + MIN_NET_TP_PERCENT` — чтобы чистая
+   прибыль после комиссий гарантированно оставалась положительной.
+3. **Трейлинг** — после профита `ATR_TRAIL_ACTIVATION_MULT × ATR` трейл-стоп
+   подтягивается за ценой на дистанцию начального SL.
+4. **Сайзинг по риску** — `notional ≈ (equity × RISK_PER_TRADE_PERCENT%) / SL%`,
+   ограничен `MAX_NOTIONAL_USDT` и `BINANCE_SPOT_MAX_QUOTE_USDT`.
+5. **AI-подтверждение (опционально)** — если `GEMINI_ENABLED=true` и ключ задан,
+   после зелёной техничке запрос к Gemini 1.5 Flash (бесплатный тариф, 15 RPM).
+   При ответе `SKIP` или `confidence < GEMINI_MIN_CONFIDENCE` вход пропускается.
+   Любая ошибка/таймаут/квота → **fail-open** (решает техничка).
 
-Режимы исполнения и ограничения P2P описаны в [docs/MVP.md](docs/MVP.md).
-
----
-
-## Бумажная симуляция прибыли
-
-**Подключать реальный TON Wallet или Binance для этого не нужно.** Достаточно `DRY_RUN=true`, Postgres и токена Telegram-бота.
-
-Стратегия при **автоторговле** или ручном срабатывании: стакан Binance P2P, риск-лимиты, при успехе — запись в БД (`SIMULATED` при `DRY_RUN=true`) или Spot-ордер при `DRY_RUN=false`. Оценка прибыли в USDT: **notional × (чистый спред % / 100)** — упрощённая модель. Сводка по бумаге и Spot — в **`/статистика`**.
-
-Цифры **не являются** финансовой гарантией и не заменяют реальный P&amp;L на бирже.
-
----
-
-## Что нужно заранее
-
-- **Node.js** 20+ и **npm**
-- **Docker** и Docker Compose (для PostgreSQL и при желании Redis)
-- Аккаунт **Telegram** и возможность написать [@BotFather](https://t.me/BotFather)
-- Для продакшена с TON: **публичный HTTPS**-URL вашего сервера (манифест TON Connect должен открываться по HTTPS)
+### Защиты
+- Дневной стоп `DAILY_MAX_LOSS_USDT`.
+- Пауза на `LOSS_STREAK_COOLDOWN_MS` после `MAX_CONSECUTIVE_LOSS_SELLS` убытков подряд.
+- Аварийный выход `BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT` от пика.
+- Расписание `TRADING_WINDOW_UTC` / `TRADING_DAYS_UTC`.
+- Circuit breaker по эквити vs `STATS_EQUITY_BASELINE_USDT`.
+- Liquidity guard: не заходим крупнее 5% от среднего 1h объёма.
+- `inFlight` guard: тик не перекрывается сам с собой.
 
 ---
 
-## Установка и запуск (локально)
+## Запуск
 
 ```bash
-cd trader   # корень проекта
-
-# 1. Зависимости
+cp .env.example .env   # заполните секреты
+docker compose up -d postgres redis
+npx prisma migrate deploy
 npm install
+npm run start:prod
+```
 
-# 2. Окружение
-cp .env.example .env
-# Отредактируйте .env — минимум DATABASE_URL и TELEGRAM_BOT_TOKEN (см. ниже)
+Или всё в Docker:
 
-# 3. База данных
-docker compose up -d postgres
+```bash
+docker compose up -d --build
+```
 
-# 4. Применить схему Prisma
+---
+
+## Основные переменные (.env)
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `BINANCE_SPOT_BASE_URL` | `https://api.binance.com` | Testnet: `https://testnet.binance.vision` |
+| `BINANCE_SPOT_SYMBOL` | `SOLUSDT` | Пара Spot |
+| `BINANCE_SPOT_MAX_QUOTE_USDT` | `20` | Потолок notional на один BUY |
+| `MAX_NOTIONAL_USDT` | `20` | Верхний лимит (сайзинг по риску может быть меньше) |
+| `RISK_PER_TRADE_PERCENT` | `1` | % эквити на риск в одной сделке |
+| `SPOT_TAKER_FEE_PERCENT` | `0.1` | Комиссия Binance Spot на одну сторону |
+| `MIN_NET_TP_PERCENT` | `0.3` | Минимальная чистая прибыль TP сверх 2×комиссии |
+| `ATR_PERIOD` | `14` | Период ATR |
+| `ATR_SL_MULT` / `ATR_TP_MULT` | `1.0` / `2.0` | Множители SL / TP от ATR |
+| `ATR_TRAIL_ACTIVATION_MULT` | `1.0` | При профите в N×ATR активируется трейлинг |
+| `ADX_MIN` | `20` | Порог ADX для торговли |
+| `EMA_FAST` / `EMA_SLOW` / `EMA_LONG` | `20`/`50`/`200` | Периоды EMA (1h) |
+| `RSI_ENTRY_MIN` / `RSI_ENTRY_MAX` | `40` / `65` | Коридор RSI для входа |
+| `SWING_LOOKBACK_4H` | `12` | Свечей 4h для swing low |
+| `GEMINI_ENABLED` | `false` | Включает AI-фильтр |
+| `GEMINI_API_KEY` | — | [aistudio.google.com](https://aistudio.google.com/app/apikey) — бесплатный ключ |
+| `GEMINI_MIN_CONFIDENCE` | `60` | Нижний порог уверенности Gemini |
+| `GEMINI_CACHE_MS` | `600000` | TTL кэша решений (10 мин) |
+| `MAX_CONSECUTIVE_LOSS_SELLS` | `5` | N убытков подряд → пауза |
+| `LOSS_STREAK_COOLDOWN_MS` | `1800000` | Пауза 30 мин по умолчанию |
+| `DAILY_MAX_LOSS_USDT` | `50` | Дневной стоп |
+| `AUTO_TRADE_INTERVAL_MS` | `180000` | Тик автоторговли |
+| `TRADING_WINDOW_UTC` | пусто | `08:00-21:00` или пусто |
+| `TRADING_DAYS_UTC` | пусто | `1-5` или пусто |
+| `STATS_EQUITY_BASELINE_USDT` | — | База для % прибыли в `/stats` |
+
+Полный список — в [.env.example](.env.example).
+
+---
+
+## Telegram
+
+- `/start`, `/menu` — меню.
+- `/stats` — компактный баланс, прибыль день/неделя/30д с %, текущая позиция и WR.
+- `/history` — последние сделки по одной строке.
+- `/market SYMBOL` — статистика свечей 1h за 24h/7d/30d.
+- `/autotrade on|off|status` — управление автоторговлей (админ).
+- Кнопки: `📊 Статистика`, `📜 История`, `📦 Выгрузка JSON`, `▶️ / ⏹`.
+
+Уведомления минималистичные:
+```
+🟢 Купил 0.226 SOL @ 88.37 (−19.97$)
+🎯 Продал 0.226 SOL @ 89.25 +0.25$ / +1.26%
+🛑 Продал 0.226 SOL @ 87.65 −0.16$ / −0.81%
+📉 Продал 0.226 SOL @ 88.90 +0.12$ / +0.60%   (трейл)
+⚠️ Продал 0.226 SOL @ 85.10 −0.66$ / −3.30%   (авария)
+⏸️ Пауза 30м · 5 убытков подряд
+```
+
+---
+
+## Получение ключей
+
+- **Telegram**: [@BotFather](https://t.me/BotFather), `/newbot`.
+- **Binance Spot**: `binance.com → API Management`. Для тестнета —
+  [testnet.binance.vision](https://testnet.binance.vision) (логин через GitHub),
+  разрешите **только** Spot Trading без вывода.
+- **Gemini**: [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey),
+  бесплатный тариф покрывает 15 RPM / 1500 RPD.
+
+---
+
+## Команды для разработки
+
+```bash
+npm run lint           # eslint --fix
+npm test               # jest
+npm run build          # компиляция в dist/
+npm run start:prod     # запуск из dist/
 npx prisma migrate dev
-
-# 5. Запуск в режиме разработки
-npm run start:dev
-```
-
-**Через Makefile** (из корня `trader/`):
-
-| Команда                             | Действие                                                                                                                         |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `make help`                         | Список всех целей                                                                                                                |
-| `make up`                           | **Весь стек в Docker:** Postgres + Redis + **Nest в контейнере `bot-trader`** (`docker compose up -d --build`) — для **сервера** |
-| `make infra`                        | Только Postgres + Redis (под **локальный** `npm run start:dev`)                                                                  |
-| `make down`                         | Остановить контейнеры (volumes не трогает)                                                                                       |
-| `make restart`                      | Перезапустить контейнеры                                                                                                         |
-| `make rebuild`                      | Обновить образы и пересоздать контейнеры                                                                                         |
-| `make destroy`                      | Остановить и **удалить volumes** (БД обнулится)                                                                                  |
-| `make dev`                          | Nest в watch на хосте (БД должна быть запущена, см. `make infra`)                                                                |
-| `make start`                        | `infra` → пауза → `prisma migrate deploy` → `npm run start:dev` (**бот не в Docker**)                                            |
-| `make migrate` / `make migrate-dev` | Миграции Prisma                                                                                                                  |
-
-Перед `make start`: `cp .env.example .env`, `make install`, для продакшена в Docker — **`make up`** и заполненный `.env`.
-
-По умолчанию HTTP-сервер слушает порт из `PORT` (часто **3000**). Проверка: в браузере или `curl` откройте `http://localhost:3000/health` — ожидается JSON с `"ok": true`.
-
-Остановка Docker:
-
-```bash
-docker compose down
-# или
-make down
+npx prisma studio
 ```
 
 ---
 
-## Получение токена Telegram-бота
-
-1. Откройте Telegram и найдите **[@BotFather](https://t.me/BotFather)**.
-2. Отправьте `/newbot` и следуйте инструкциям: имя бота и **username** (должен заканчиваться на `bot`).
-3. BotFather выдаст **токен** вида `123456789:AAH...` — это секрет; никому не показывайте и не коммитьте в git.
-4. Вставьте токен в `.env`:
-
-   ```env
-   TELEGRAM_BOT_TOKEN=123456789:AAH...
-   ```
-
-5. Перезапустите приложение (`npm run start:dev` или процесс в PM2/systemd).
-
-После запуска бот будет отвечать на команды в Telegram (если `NODE_ENV` не равен `test` — в тестах бот намеренно не стартует).
-
----
-
-## Ключи API Binance (опционально)
-
-### Нужны ли они сейчас?
-
-- **Нет**, если вы только смотрите спред и включаете **симуляцию** с `DRY_RUN=true` — используется **публичный** endpoint поиска объявлений P2P, ключи не передаются.
-- **Да**, для **Spot** создайте ключи в аккаунте Binance → **API Management**, укажите в `.env` `BINANCE_API_KEY` / `BINANCE_API_SECRET`, выставьте `DRY_RUN=false`. Исполнение — **рыночный ордер** по паре `BINANCE_SPOT_SYMBOL` (по умолчанию `SOLUSDT`; задайте другую пару *USDT при необходимости); сигнал стратегии — по **P2P-спреду** USDT/`FIAT` и риск-фильтру (это не арбитраж Spot↔P2P).
-
-**Стратегия Spot (кратко):** по умолчанию `BINANCE_SPOT_STRATEGY=fixed_side` — одна сторона (`BINANCE_SPOT_ORDER_SIDE`, обычно BUY). Режим **`roundtrip`**: учёт позиции в БД (`BotState`), покупка до `BINANCE_SPOT_MAX_QUOTE_USDT` (с опциональным **масштабом от волатильности**), продажа учётного объёма при **тейк-профите** (цена выше средней входа на `BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT`), при **стоп-лоссе** от средней (`BINANCE_SPOT_ROUNDTRIP_STOP_LOSS_PERCENT`), либо при **аварийном выходе от пика марка** (`BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT` — просадка от максимума марка с момента входа). Приоритет метки выхода на SELL: стоп от средней → аварийный от пика → тейк. Лимит позиции: `BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT`. Без `BINANCE_SPOT_ROUNDTRIP_ACCUMULATE=true` при открытой позиции новых BUY нет — ждём выхода. Опционально: не открывать BUY при слишком высокой волатильности или росте за 24h (`BINANCE_SPOT_SKIP_BUY_*`). Перед покупкой проверяется свободный USDT.
-
-**Риски и лимиты:** `DAILY_MAX_LOSS_USDT` и `MAX_DAILY_SPOT_TRADES` ограничивают автоторговлю по суткам UTC (см. раздел «Ограничения…»). Оценка по P2P в отчётах **не равна** реальному PnL на Spot.
-
-**Публичные свечи:** команда `/market` и внутренние фильтры используют `GET /api/v3/klines` (без ключей) на `BINANCE_SPOT_BASE_URL`; кэш `MARKET_STATS_CACHE_TTL_SEC` (и Redis при наличии).
-
-### Журнал возможностей (для разработки)
-
-- **Roundtrip:** пик марка в БД (`spotRoundtripPeakMarkUsdt`), аварийный выход, фильтры BUY по σ/росту 24h, масштаб quote от волатильности.
-- **Telegram:** `/market` — сводка 24h / 7d / 30d по паре Spot; `/trades_export` [N] — JSON экспорт сделок из БД (только админ).
-- **Тесты:** утилиты `market-stats.util`, `spot-roundtrip.util` (часть логики roundtrip).
-
-### Как создать API Key на Binance
-
-Точные пункты меню могут меняться; ориентируйтесь на актуальный интерфейс [Binance](https://www.binance.com):
-
-1. Войдите в аккаунт, пройдите **верификацию** (KYC), включите **2FA** (Google Authenticator и т.д.).
-2. Перейдите в раздел **API Management** (Управление API).
-3. Создайте новый API Key; при необходимости задайте **ограничение по IP** (рекомендуется для сервера с фиксированным IP).
-4. Права (permissions): включайте **только то, что нужно**. Для вывода средств (`Enable Withdrawals`) — по возможности **не включайте**, если в этом нет жёсткой необходимости.
-5. Сохраните **API Key** и **Secret** один раз — Secret показывается только при создании.
-
-В `.env`:
-
-```env
-BINANCE_API_KEY=ваш_api_key
-BINANCE_API_SECRET=ваш_secret
-```
-
-База Spot по умолчанию — `https://api.binance.com`. Ключи с **Spot Testnet** ([testnet.binance.vision](https://testnet.binance.vision)) работают только с `BINANCE_SPOT_BASE_URL=https://testnet.binance.vision` — иначе Binance вернёт −2015 «Invalid API-key…». Шаблон — [.env.example](.env.example).
-
-**Безопасность:**
-
-- Не храните ключи в репозитории; используйте `.env` на сервере, секреты CI/CD, Vault и т.п.
-- Регулярно **ротируйте** ключи при компрометации.
-- Проверяйте [официальную документацию Binance API](https://binance-docs.github.io/apidocs/spot/en/) и условия использования P2P/C2C.
-
----
-
-## PostgreSQL и миграции
-
-Строка подключения задаётся в **`DATABASE_URL`**. Для стека из `docker-compose.yml` по умолчанию:
-
-```env
-DATABASE_URL=postgresql://trader:trader@localhost:5432/trader
-```
-
-После изменения `prisma/schema.prisma`:
-
-```bash
-npx prisma migrate dev
-```
-
-Только генерация клиента без миграций:
-
-```bash
-npm run prisma:generate
-```
-
----
-
-## Redis (опционально)
-
-Поднять Redis из того же `docker-compose.yml`:
-
-```bash
-docker compose up -d redis
-```
-
-Порт Redis проброшен на **`127.0.0.1:6379`** (только localhost) — можно указать в `.env` для **Nest на хосте** (`make infra` + `npm run start:dev`):
-
-```env
-REDIS_URL=redis://127.0.0.1:6379
-```
-
-Контейнер **`bot-trader`** получает **`REDIS_URL=redis://redis:6379`** из секции `environment` в `docker-compose.yml` — это **перекрывает** значение из `.env` (важно: в Docker не используйте `redis://127.0.0.1:6379`, иначе внутри контейнера это не тот Redis). У `redis` в compose есть **healthcheck**; бот стартует после **готовности** Redis.
-
-Если `REDIS_URL` **пустой**, бот работает без Redis; антиспам для cron-алертов по спреду — в **памяти процесса**.
-
-Если в `.env` указан недоступный URL (типично: `127.0.0.1` при запуске **внутри** Docker без override), в логах будет ошибка подключения — используйте URL из compose для контейнера или оставьте Redis пустым.
-
----
-
-## Переменные окружения (.env)
-
-Шаблон — [.env.example](.env.example). Обязательно: **`DATABASE_URL`**, **`TELEGRAM_BOT_TOKEN`**. Остальное — в комментариях в шаблоне; для Spot при `DRY_RUN=false` — ключи Binance и `BINANCE_SPOT_BASE_URL` (testnet: `https://testnet.binance.vision`).
-
-Дополнительные ключи (TON, режим банковского подтверждения и т.д.) описаны в коде: [src/config/configuration.ts](src/config/configuration.ts), валидация в [src/config/env.validation.ts](src/config/env.validation.ts).
-
----
-
-## TON Connect и HTTPS
-
-1. Манифест отдаётся приложением: **`GET /tonconnect-manifest.json`** (см. [src/ton/ton.controller.ts](src/ton/ton.controller.ts)).
-2. Для реальных кошельков URL манифеста должен быть доступен по **HTTPS** с валидным сертификатом.
-3. Укажите публичный URL в `TON_CONNECT_MANIFEST_URL` и согласуйте с `PUBLIC_BASE_URL` (например `https://bot.example.com` и `https://bot.example.com/tonconnect-manifest.json`).
-4. Команда `/connect` в Telegram подсказывает пользователю ссылку на манифест.
-
-Подробнее о роли TON в проекте — в [docs/MVP.md](docs/MVP.md).
-
----
-
-## Алерты в Telegram (chat id)
-
-`TELEGRAM_ALERT_CHAT_ID` используется **автоторговлей**: в этот чат уходят сообщения о **исполнении сделки** (покупка/продажа), **ошибке ордера** и т.п. (см. `AutoTradeService`).
-
-1. Напишите боту [@userinfobot](https://t.me/userinfobot) или [@getidsbot](https://t.me/getidsbot) и узнайте свой **числовой id** (для личных чатов) или id группы (для групп бот должен быть добавлен).
-2. Укажите в `.env`:
-
-   ```env
-   TELEGRAM_ALERT_CHAT_ID=123456789
-   ```
-
-3. Перезапустите приложение.
-
-**Опционально:** периодические сообщения о **высоком P2P-спреде** USDT/фиат (не про Spot) включите явно: `TELEGRAM_SPREAD_ALERTS_ENABLED=true`. По умолчанию они **выключены**, чтобы в чате оставались только уведомления о сделках. Такие алерты не чаще ~раз в 10 минут (Redis или память).
-
----
-
-## Команды бота
-
-| Команда                      | Описание                                                                                                                       |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `/start`                     | Текст + **постоянная клавиатура**: «Статистика»; для пользователей из `ADMIN_TELEGRAM_IDS` — «Включить/Выключить автоторговлю» |
-| `/menu`                      | Снова показать клавиатуру                                                                                                      |
-| `/статистика` или `/stats`   | Сводка: режим, баланс, оценки, последние операции                                                                              |
-| `/market`                    | Публичные свечи Binance по `BINANCE_SPOT_SYMBOL`: изменение/диапазон/σ за 24h, 7d, 30d и эвристика осторожности (не совет)     |
-| `/trades_export` [N]         | Файл JSON: история сделок из БД (до N≤8000 записей, по умолчанию 5000). **Только админ**                                        |
-| `/autotrade on\|off\|status` | То же, что кнопки (только админ). Интервал тика: `AUTO_TRADE_INTERVAL_MS`                                                      |
-
-**P2P** (объявления, банковские переводы) по API **не** автоматизируются. **Spot** — подписанные MARKET-ордера при `DRY_RUN=false` и заданных API-ключах.
-
-**Дубли ответов на одну команду** почти всегда значат: запущено **два процесса** с одним `TELEGRAM_BOT_TOKEN` (два контейнера, PM2 `instances > 1`, `nest --watch` на пару секунд с двумя воркерами, бот в Docker и тот же токен локально). Оставьте **один** инстанс бота. Если нужно несколько реплик — задайте **рабочий** `REDIS_URL` к общему Redis: бот дедуплицирует `update_id` через `SET NX`. Если Redis в compose **без** проброса порта, с хоста указывать `redis://127.0.0.1:6379` бессмысленно — дедуп снова только внутри процесса, и два инстанса дадут дубли. При старте приложение делает `PING` в Redis и пишет в лог, удалось ли подключиться.
-
-Если `REQUIRE_TON_ACCESS=true`, для команд (кроме сценария с админами) может потребоваться флаг оплаты в БД — см. модель `TelegramUser` и [docs/SECRETS_AND_AUDIT.md](docs/SECRETS_AND_AUDIT.md).
-
----
-
-## Продакшен
-
-### Вариант A: всё в Docker (стек `bot-trader`)
-
-Проект в Compose называется **`bot-trader`**, контейнер приложения — **`bot-trader`**, образ собирается из [Dockerfile](Dockerfile).
-
-1. На сервере: скопируйте проект, создайте **`.env`** (из [.env.example](.env.example)), обязательно **`TELEGRAM_BOT_TOKEN`**, **`ADMIN_TELEGRAM_IDS`**, при необходимости **`POSTGRES_PASSWORD`** (тогда же поменяйте пользователя/пароль в `docker-compose.yml` в блоке `environment` сервиса `bot-trader` для `DATABASE_URL` и в `postgres` — или оставьте дефолты `trader` только для теста).
-2. В `.env` для продакшена укажите **`PUBLIC_BASE_URL`** и **`TON_CONNECT_MANIFEST_URL`** с **HTTPS**-доменом (не `localhost`).
-3. Запуск всего стека (образ приложения + миграции при старте контейнера):
-
-   ```bash
-   make up
-   ```
-
-4. Снаружи публикуется порт **`APP_PORT`** (по умолчанию **3000**) → проброс на контейнер `bot-trader`. За **Nginx/Caddy** с TLS проксируйте на `127.0.0.1:3000`.
-5. Внутри сети Compose **`DATABASE_URL` и `REDIS_URL` подставляются автоматически** (хосты `postgres` и `redis`). Не дублируйте в `.env` `localhost` для этих переменных при запуске **в Docker** — иначе приложение не достучится до БД.
-
-Логи: `docker compose logs -f bot-trader`. Остановка: `make down`.
-
-**Локальная разработка с кодом на хосте:** `make infra` — только **Postgres + Redis**; затем `npm run start:dev` или `make start`.
-
-### Вариант B: Node на хосте, БД в Docker
-
-1. `make infra` — только Postgres + Redis.
-2. В `.env` — `DATABASE_URL=postgresql://trader:trader@localhost:5432/trader`.
-3. `npm run build` → `npm run start:prod`.
-
-### Общее
-
-- Храните секреты вне репозитория; ограничьте доступ к серверу и БД.
-- Резервное копирование тома **`pgdata`** (PostgreSQL).
-
----
-
-## Частые проблемы
-
-| Симптом                                       | Что проверить                                                                                                                                                                                                                        |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Бот не отвечает                               | Токен в `.env`, второй процесс с тем же ботом. В логах должны быть строки `Telegram: onApplicationBootstrap` и `Telegram: polling OK`. Если их нет — хост/сеть блокирует **api.telegram.org** (нужен VPN/другой маршрут для Docker). |
-| Ошибка подключения к БД                       | Запущен ли `docker compose up -d postgres`, верный ли `DATABASE_URL`                                                                                                                                                                 |
-| Prisma P1001                                  | PostgreSQL недоступен по хосту/порту                                                                                                                                                                                                 |
-| Нет сделок / пустой стакан в логике стратегии | Для пары **USDT/RUB** иногда нет объявлений (регион/IP). Временно **`FIAT=USD`** в `.env`, перезапуск.                                                                                                                               |
-| Таймаут / ошибка соединения при `curl`        | Сеть, файрвол, DNS; иной VPN.                                                                                                                                                                                                        |
-| TON не подключается                           | Манифест только по HTTPS, корректный `TON_CONNECT_MANIFEST_URL`                                                                                                                                                                      |
-
----
-
-## Ограничения, расписание UTC и ручная пауза
-
-- **Пауза без кода.** Перед новостями, макро-событиями или обслуживанием биржи выключайте автоторговлю: команда `/autotrade off` (или кнопка для админа). P2P-спред и Spot — разные рынки: сигнал по P2P не гарантирует результат на Spot.
-- **Testnet и прод.** `BINANCE_SPOT_BASE_URL=https://testnet.binance.vision` даёт иные ликвидность и цены; пороги `MIN_SPREAD_*`, TP/SL и лимиты нужно перекалибровать под среду, не копировать «как есть» с тестнета на прод.
-- **Окно по времени (UTC).** Необязательно: `TRADING_WINDOW_UTC` (например `08:00-21:00`) и `TRADING_DAYS_UTC` (например `1-5` — понедельник–пятница, формат Пн=1 … Вс=7). Пустые значения = без фильтра. Вне окна тики автоторговли не запускают симуляцию/ордера.
-- **Дневные лимиты Spot (UTC).** `DAILY_MAX_LOSS_USDT` — суммарный реализованный убыток по оценке `realizedPnlUsdtEstimate` на **исполненных** SELL roundtrip за календарный день UTC; при достижении лимита новые шаги автоторговли не выполняются. Значение `0` отключает этот порог. `MAX_DAILY_SPOT_TRADES` — максимум **исполненных** Spot-ордеров (`EXECUTED`, провайдер `binance_spot`) за сутки UTC; `0` = без лимита по числу сделок.
-- **Несколько процессов.** Два инстанса с одним ботом дают двойные тики; держите один воркер или общий Redis для дедупликации (см. раздел «Команды бота»).
-
----
-
-## Дополнительная документация
-
-- [docs/EXCHANGE_API.md](docs/EXCHANGE_API.md) — API Binance P2P в контексте проекта
-- [docs/MVP.md](docs/MVP.md) — режимы `DRY_RUN`, исполнение, банковский шаг
-- [docs/SECRETS_AND_AUDIT.md](docs/SECRETS_AND_AUDIT.md) — секреты, аудит, идемпотентность
-
----
-
-## Скрипты npm
-
-| Скрипт                          | Назначение                |
-| ------------------------------- | ------------------------- |
-| `npm run start:dev`             | Разработка с hot-reload   |
-| `npm run start:prod`            | Запуск собранного `dist/` |
-| `npm run build`                 | Сборка                    |
-| `npm test` / `npm run test:e2e` | Тесты                     |
-| `npm run lint`                  | ESLint                    |
-| `npm run prisma:generate`       | Генерация Prisma Client   |
-| `npm run prisma:migrate`        | Миграции (dev)            |
+## Почему не покупается прямо сейчас
+
+Новая стратегия **отсеивает** шумовые сетапы. При боковике или контртренде 4h бот просто
+ждёт — это нормально. Причины пропуска ищите в таблице `AuditLog` (действие `tick_skip*`)
+и в логах сервиса.
 
 ---
 
 ## Лицензия
 
-Private / UNLICENSED — использование на свой страх и риск; авторы не несут ответственности за торговые и юридические последствия.
-
-# bot-trader
+UNLICENSED / личное использование. Торговля криптовалютой сопряжена с риском потери средств.

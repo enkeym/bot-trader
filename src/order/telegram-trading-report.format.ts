@@ -1,38 +1,10 @@
 /**
- * Оформление сводки /stats для Telegram: рамки ┌─│└, выравнивание, даты.
+ * Компактные хелперы форматирования для Telegram-отчётов.
+ * Таблицы вырезаны в пользу коротких 1–3 строчных шаблонов.
  */
 
-export const TELEGRAM_STATS_LINE_WIDTH = 36;
-
-export function telegramStatsBoxTop(title: string): string {
-  const s = `┌─ ${title} `;
-  return s + '─'.repeat(Math.max(1, TELEGRAM_STATS_LINE_WIDTH - s.length));
-}
-
-export function telegramStatsBoxBottom(): string {
-  return `└${'─'.repeat(TELEGRAM_STATS_LINE_WIDTH - 1)}`;
-}
-
-/** Пустая строка внутри рамки */
-export function telegramStatsBoxBlank(): string {
-  return '│';
-}
-
-/** Текст с отступом (два пробела после │) */
-export function telegramStatsLine(text: string): string {
-  return `│  ${text}`;
-}
-
-/** Горизонталь внутри блока (как в примере ━━━) */
-export function telegramStatsInnerHr(): string {
-  return `│  ${'━'.repeat(Math.max(8, TELEGRAM_STATS_LINE_WIDTH - 4))}`;
-}
-
-export function telegramStatsHistorySeparator(): string {
-  return `│  ${'─ '.repeat(14).trimEnd()}`;
-}
-
 export function fmtStatsNumber(n: number, minFd = 2, maxFd = 4): string {
+  if (!Number.isFinite(n)) return '—';
   return n.toLocaleString('ru-RU', {
     minimumFractionDigits: minFd,
     maximumFractionDigits: maxFd,
@@ -40,6 +12,7 @@ export function fmtStatsNumber(n: number, minFd = 2, maxFd = 4): string {
 }
 
 export function fmtStatsQtyBase(n: number): string {
+  if (!Number.isFinite(n)) return '—';
   const s = n.toFixed(8).replace(/\.?0+$/, '');
   return s === '' ? '0' : s;
 }
@@ -59,17 +32,6 @@ export function fmtStatsDateTime(d: Date, timeZone = 'Europe/Moscow'): string {
   return `${v('day')}.${v('month')} ${v('hour')}:${v('minute')}`;
 }
 
-export function fmtVolumeShort(vol: number, baseSuffix: string): string {
-  if (!Number.isFinite(vol) || vol < 0) return `— ${baseSuffix}`;
-  if (vol >= 1_000_000) {
-    return `${(vol / 1_000_000).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}M ${baseSuffix}`;
-  }
-  if (vol >= 1_000) {
-    return `${(vol / 1_000).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}K ${baseSuffix}`;
-  }
-  return `${fmtStatsNumber(vol, 2, 4)} ${baseSuffix}`;
-}
-
 export function fmtUptimeProcess(sec: number): string {
   const s = Math.max(0, Math.floor(sec));
   const d = Math.floor(s / 86_400);
@@ -82,41 +44,33 @@ export function fmtUptimeProcess(sec: number): string {
   return parts.join(' ');
 }
 
-export function fmtAutotradeIntervalRu(ms: number): string {
-  const s = Math.max(1, Math.round(ms / 1000));
-  if (s < 60) return `~${s}с`;
-  const m = Math.round(s / 60);
-  return `~${m}мин`;
-}
-
-export function pctArrow(changePct: number): string {
-  if (!Number.isFinite(changePct)) return '';
-  if (changePct > 0) return '↑';
-  if (changePct < 0) return '↓';
-  return '→';
-}
-
 export function fmtDurationShort(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—';
   const totalMin = Math.round(ms / 60_000);
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  if (h > 0) {
-    return `~${h}ч ${m.toString().padStart(2, '0')}м`;
-  }
-  return `~${Math.max(1, totalMin)}м`;
+  if (h > 0) return `${h}ч ${m}м`;
+  return `${Math.max(1, totalMin)}м`;
 }
 
-function exitKindRu(k: string | null | undefined): string {
+export type ExitKind =
+  | 'take_profit'
+  | 'stop_loss'
+  | 'emergency_drawdown'
+  | 'trailing_stop';
+
+export function exitKindShort(k: string | null | undefined): string {
   switch (k) {
     case 'take_profit':
-      return '🎯 тейк-профит';
+      return '🎯';
     case 'stop_loss':
-      return '🛡 стоп';
+      return '🛑';
     case 'emergency_drawdown':
-      return '⚡ авария';
+      return '⚠️';
+    case 'trailing_stop':
+      return '📉';
     default:
-      return '';
+      return '💸';
   }
 }
 
@@ -144,78 +98,45 @@ export type TelegramStatsHistoryRow =
     }
   | { kind: 'other'; line: string };
 
-function formatOneHistoryRow(row: TelegramStatsHistoryRow): string[] {
-  if (row.kind === 'other') {
-    return [telegramStatsLine(row.line)];
-  }
-  const t = fmtStatsDateTime(row.at);
-  const lines: string[] = [
-    telegramStatsLine(`🕐 ${t}`),
-    telegramStatsBoxBlank(),
-  ];
-  if (row.kind === 'spot_buy') {
-    lines.push(telegramStatsLine('📥 ПОКУПКА'));
-    lines.push(
-      telegramStatsLine(
-        `├ Кол-во:  ${fmtStatsQtyBase(row.baseQty)} ${row.baseAsset}`,
-      ),
-    );
-    lines.push(
-      telegramStatsLine(
-        `├ Цена:    ${fmtStatsNumber(row.avgPrice, 2, 2)} ${row.quoteAsset}`,
-      ),
-    );
-    lines.push(
-      telegramStatsLine(
-        `├ Сумма:   −${fmtStatsNumber(row.quoteQty)} ${row.quoteAsset}`,
-      ),
-    );
-    lines.push(telegramStatsLine('└ Причина: сигнал бота'));
-    return lines;
-  }
-  const tag = exitKindRu(row.exitKind);
-  const head = tag ? `📤 ПРОДАЖА ${tag}` : '📤 ПРОДАЖА';
-  lines.push(telegramStatsLine(head));
-
-  const tailParts: string[] = [
-    `Кол-во:  ${fmtStatsQtyBase(row.baseQty)} ${row.baseAsset}`,
-    `Цена:    ${fmtStatsNumber(row.avgPrice, 2, 2)} ${row.quoteAsset}`,
-    `Сумма:   +${fmtStatsNumber(row.quoteQty)} ${row.quoteAsset}`,
-  ];
-  const rtp = row.realizedPnlUsdt;
-  if (rtp != null && Number.isFinite(rtp)) {
-    const proceeds = row.quoteQty;
-    const costBasis = proceeds - rtp;
-    const pct = costBasis > 0 ? (rtp / costBasis) * 100 : Number.NaN;
-    const pctStr = Number.isFinite(pct)
-      ? ` (${rtp >= 0 ? '+' : ''}${fmtStatsNumber(pct, 2, 2)}%)`
-      : '';
-    tailParts.push(
-      `Прибыль: ${rtp >= 0 ? '+' : ''}${fmtStatsNumber(rtp)} ${row.quoteAsset}${pctStr}`,
-    );
-  }
-  if (row.holdMs != null && Number.isFinite(row.holdMs) && row.holdMs > 0) {
-    tailParts.push(`Время в позиции: ${fmtDurationShort(row.holdMs)}`);
-  }
-  for (let i = 0; i < tailParts.length; i++) {
-    const branch = i === tailParts.length - 1 ? '└' : '├';
-    lines.push(telegramStatsLine(`${branch} ${tailParts[i]}`));
-  }
-  return lines;
+function fmtSignedMoney(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  const sign = v >= 0 ? '+' : '';
+  return `${sign}${fmtStatsNumber(v, 2, 2)}$`;
 }
 
-/** Линии тела блока «история» (без внешней рамки). */
+function fmtSignedPct(v: number): string {
+  if (!Number.isFinite(v)) return '';
+  const sign = v >= 0 ? '+' : '';
+  return `${sign}${fmtStatsNumber(v, 2, 2)}%`;
+}
+
+/** Одна строка на сделку вида: «DD.MM HH:mm · 🟢 Купил 0.226 @ 88.37 (−19.97$)». */
+export function formatHistoryRow(row: TelegramStatsHistoryRow): string {
+  if (row.kind === 'other') return row.line;
+  const t = fmtStatsDateTime(row.at);
+  if (row.kind === 'spot_buy') {
+    return `${t} · 🟢 Купил ${fmtStatsQtyBase(row.baseQty)} ${row.baseAsset} @ ${fmtStatsNumber(row.avgPrice, 2, 2)} (−${fmtStatsNumber(row.quoteQty, 2, 2)}$)`;
+  }
+  const icon = exitKindShort(row.exitKind);
+  const rp = row.realizedPnlUsdt;
+  let pnlStr = '';
+  if (rp != null && Number.isFinite(rp)) {
+    const proceeds = row.quoteQty;
+    const cost = proceeds - rp;
+    const pct = cost > 0 ? (rp / cost) * 100 : NaN;
+    pnlStr = ` ${fmtSignedMoney(rp)}`;
+    if (Number.isFinite(pct)) pnlStr += ` / ${fmtSignedPct(pct)}`;
+  }
+  const hold =
+    row.holdMs != null && Number.isFinite(row.holdMs) && row.holdMs > 0
+      ? ` · ${fmtDurationShort(row.holdMs)}`
+      : '';
+  return `${t} · ${icon} Продал ${fmtStatsQtyBase(row.baseQty)} ${row.baseAsset} @ ${fmtStatsNumber(row.avgPrice, 2, 2)}${pnlStr}${hold}`;
+}
+
+/** Каждая сделка — одна строка. */
 export function buildTelegramStatsHistoryBlocks(
   rows: TelegramStatsHistoryRow[],
 ): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < rows.length; i++) {
-    if (i > 0) {
-      out.push(telegramStatsBoxBlank());
-      out.push(telegramStatsHistorySeparator());
-      out.push(telegramStatsBoxBlank());
-    }
-    out.push(...formatOneHistoryRow(rows[i]));
-  }
-  return out;
+  return rows.map(formatHistoryRow);
 }

@@ -326,9 +326,7 @@ export class BinanceSpotService {
         };
         const lastPrice = d.lastPrice != null ? parseFloat(d.lastPrice) : NaN;
         const priceChangePercent =
-          d.priceChangePercent != null
-            ? parseFloat(d.priceChangePercent)
-            : NaN;
+          d.priceChangePercent != null ? parseFloat(d.priceChangePercent) : NaN;
         const highPrice = d.highPrice != null ? parseFloat(d.highPrice) : NaN;
         const lowPrice = d.lowPrice != null ? parseFloat(d.lowPrice) : NaN;
         const volume = d.volume != null ? parseFloat(d.volume) : NaN;

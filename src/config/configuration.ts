@@ -6,12 +6,6 @@ export default () => ({
   redisUrl: process.env.REDIS_URL,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramAlertChatId: process.env.TELEGRAM_ALERT_CHAT_ID,
-  /**
-   * P2P-алерты спреда (SpreadMonitor, раз в 5 мин). По умолчанию выкл. —
-   * в чат уходят только уведомления автоторговли о покупке/продаже/ошибке сделки.
-   */
-  telegramSpreadAlertsEnabled:
-    process.env.TELEGRAM_SPREAD_ALERTS_ENABLED === 'true',
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000',
   adminTelegramIds: (process.env.ADMIN_TELEGRAM_IDS ?? '')
     .split(',')
@@ -23,132 +17,34 @@ export default () => ({
     /** База Spot API; по умолчанию продакшен Binance */
     spotBaseUrl: process.env.BINANCE_SPOT_BASE_URL ?? 'https://api.binance.com',
     spotSymbol: process.env.BINANCE_SPOT_SYMBOL ?? 'SOLUSDT',
-    spotOrderSide:
-      (process.env.BINANCE_SPOT_ORDER_SIDE as 'BUY' | 'SELL') ?? 'BUY',
-    /** Потолок quote на один MARKET BUY (USDT), если котировка пары — USDT */
+    /** Потолок quote на один MARKET BUY (USDT) */
     spotMaxQuoteUsdt: parseFloat(
       process.env.BINANCE_SPOT_MAX_QUOTE_USDT ?? '20',
     ),
-    /** Потолок quote в RUB для пар вроде USDTRUB */
+    /** Потолок quote в RUB для пар вида USDTRUB (на случай смены пары) */
     spotMaxQuoteRub: parseFloat(
       process.env.BINANCE_SPOT_MAX_QUOTE_RUB ?? '50000',
     ),
-    /** Для MARKET SELL — объём в базовом активе (напр. BTC) */
-    spotQuantity: parseFloat(process.env.BINANCE_SPOT_QUANTITY ?? '0'),
-    /** `fixed_side` — одна сторона из BINANCE_SPOT_ORDER_SIDE; `roundtrip` — BUY/SELL по позиции и take-profit */
-    spotStrategy:
-      (process.env.BINANCE_SPOT_STRATEGY as 'fixed_side' | 'roundtrip') ??
-      'fixed_side',
-    /**
-     * Take-profit к средней цене входа (%). Дефолт 0.65 — разумный шаг к балансу со стопом ~1%.
-     * Следующий шаг: поднять до 1.0 и MIN_TAKE ниже (см. roundtripMinTakeProfitPercent).
-     */
-    roundtripTakeProfitPercent: parseFloat(
-      process.env.BINANCE_SPOT_ROUNDTRIP_TAKE_PROFIT_PERCENT ?? '0.65',
-    ),
-    /**
-     * 0 = выкл. Нижняя граница эффективного тейка: max(TAKE, MIN, ASSUMED_FEE).
-     * Дефолт 0.35 — пол не ниже комиссий; не задавайте выше желаемого TAKE.
-     * Следующий шаг при TAKE=1.0: MIN ≈ 0.45 (если комиссии выросли — чуть выше).
-     */
-    roundtripMinTakeProfitPercent: parseFloat(
-      process.env.BINANCE_SPOT_ROUNDTRIP_MIN_TAKE_PROFIT_PERCENT ?? '0.35',
-    ),
-    /**
-     * Оценка полного круга BUY+SELL (% taker и т.д.) — участвует в max() с TAKE и MIN.
-     * Держите близко к реальности; занижать нельзя «ради красивого процента».
-     */
-    roundtripAssumedRoundtripFeePercent: parseFloat(
-      process.env.BINANCE_SPOT_ASSUMED_ROUNDTRIP_FEE_PERCENT ?? '0.22',
-    ),
-    /**
-     * 0 = выкл. Если свободной базы на Spot **меньше**, чем учёт tracked, и недостаток
-     * относительно tracked > N % — не торговать (ручная продажа / перевод / сбой).
-     * Лишний free той же монеты не блокирует (SELL только min(free, tracked)).
-     */
-    roundtripBalanceDivergenceMaxPct: parseFloat(
-      process.env.BINANCE_SPOT_BALANCE_DIVERGENCE_MAX_PCT ?? '0',
-    ),
-    /**
-     * true — при каждом сигнале докупать, пока TP не достигнут (старое поведение).
-     * false — пока есть учётная позиция и TP не сработал, не BUY (ждём роста цены до SELL).
-     */
-    roundtripAccumulateOnSignal:
-      process.env.BINANCE_SPOT_ROUNDTRIP_ACCUMULATE === 'true',
-    /** 0 = выкл. Иначе продать учётную позицию, если цена ниже средней на N % (ограничение убытка). */
-    roundtripStopLossPercent: parseFloat(
-      process.env.BINANCE_SPOT_ROUNDTRIP_STOP_LOSS_PERCENT ?? '0',
-    ),
-    /**
-     * 0 = выкл. Макс. «стоимость» учётной позиции в USDT (tracked × средняя цена);
-     * при докупках не даёт набирать позицию больше лимита.
-     */
+    /** 0 = выкл. Лимит стоимости открытой позиции (tracked × avgEntry) в USDT */
     roundtripMaxPositionUsdt: parseFloat(
       process.env.BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_USDT ?? '0',
     ),
-    /** Лимит позиции в RUB учёта для USDTRUB (0 = выкл.) */
+    /** 0 = выкл. То же в RUB для пар с RUB */
     roundtripMaxPositionRub: parseFloat(
       process.env.BINANCE_SPOT_ROUNDTRIP_MAX_POSITION_RUB ?? '0',
     ),
-    /** 0 = выкл. Продажа, если цена упала на N % от пика марка с момента входа (раньше глубокого SL). */
+    /** 0 = выкл. Аварийный выход: падение марка от пика на N % */
     roundtripEmergencyDrawdownPercent: parseFloat(
-      process.env.BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT ?? '0',
+      process.env.BINANCE_SPOT_ROUNDTRIP_EMERGENCY_DRAWDOWN_PERCENT ?? '3',
     ),
-    /** Порог изменения 24h для полной остановки покупок (напр. -10). 0 = выкл. */
-    crashHaltChange24hPct: parseFloat(
-      process.env.BINANCE_SPOT_CRASH_HALT_CHANGE_24H_PCT ?? '0',
-    ),
-    /** Порог изменения 24h для уменьшения позиции вдвое (напр. -5). 0 = выкл. */
-    crashReduceChange24hPct: parseFloat(
-      process.env.BINANCE_SPOT_CRASH_REDUCE_CHANGE_24H_PCT ?? '0',
-    ),
-    /** 0 = выкл. Не BUY, если σ доходностей 1h за 24h выше порога (п.п.). */
-    skipBuyVolatilityStdevGt: parseFloat(
-      process.env.BINANCE_SPOT_SKIP_BUY_VOLATILITY_STDDEV_GT ?? '0',
-    ),
-    /** 0 = выкл. Не BUY, если рост close за 24h выше N % (перегрев). */
-    skipBuyChange24hGt: parseFloat(
-      process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_24H_GT ?? '0',
-    ),
-    /**
-     * 0 = выкл. Если < 0 (напр. -2): не BUY, когда изменение close за 24h ниже порога
-     * (сильное падение — не набирать позицию на каждом P2P-сигнале).
-     */
-    skipBuyChange24hLt: parseFloat(
-      process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_24H_LT ?? '0',
-    ),
-    /**
-     * 0 = выкл. Если < 0: то же по окну 7d (168h) — отсечь затяжной даунтренд.
-     */
-    skipBuyChange168hLt: parseFloat(
-      process.env.BINANCE_SPOT_SKIP_BUY_CHANGE_168H_LT ?? '0',
-    ),
-    /** 0 = выкл. После успешного SELL, полностью закрывшего учётную позицию, не BUY N мс. */
+    /** 0 = выкл. Cooldown после SELL, закрывшего позицию, перед следующим BUY (мс) */
     buyCooldownAfterSellMs: parseInt(
-      process.env.BINANCE_SPOT_BUY_COOLDOWN_AFTER_SELL_MS ?? '0',
+      process.env.BINANCE_SPOT_BUY_COOLDOWN_AFTER_SELL_MS ?? '600000',
       10,
     ),
-    /**
-     * 0 = выкл. Окно часов для макс. high свечей (фактически: ≤24 → h24, ≤168 → h168, иначе h720).
-     * Вместе с buyMinPullbackFromHighPct отсекает покупки у локального хая.
-     */
-    buyPullbackWindowHours: parseInt(
-      process.env.BINANCE_SPOT_BUY_PULLBACK_WINDOW_HOURS ?? '0',
-      10,
-    ),
-    /** 0 = выкл. Мин. откат марка от макс. high в окне, % (напр. 0.12 = не покупать у хая). */
-    buyMinPullbackFromHighPct: parseFloat(
-      process.env.BINANCE_SPOT_BUY_MIN_PULLBACK_FROM_HIGH_PCT ?? '0',
-    ),
-    quoteVolatilityScaleEnabled:
-      process.env.BINANCE_SPOT_QUOTE_VOLATILITY_SCALE === 'true',
-    /** Референсная σ (п.п.) для масштаба: при σ выше рынка quote уменьшается */
-    quoteVolatilityRefStdevPp: parseFloat(
-      process.env.BINANCE_SPOT_QUOTE_VOLATILITY_REF_STDDEV_PP ?? '0.2',
-    ),
-    /** Нижняя граница множителя к max quote (0.25 = не ниже 25% от лимита) */
-    quoteVolatilityMinScale: parseFloat(
-      process.env.BINANCE_SPOT_QUOTE_VOLATILITY_MIN_SCALE ?? '0.25',
+    /** 0 = выкл. Расхождение free базы vs учётной позиции в % (блокирует SELL если < tracked) */
+    roundtripBalanceDivergenceMaxPct: parseFloat(
+      process.env.BINANCE_SPOT_BALANCE_DIVERGENCE_MAX_PCT ?? '3',
     ),
     /** Окно допустимого сдвига timestamp для подписанных запросов (мс), макс. 60000 */
     recvWindowMs: Math.min(
@@ -162,62 +58,83 @@ export default () => ({
   executionMode:
     (process.env.EXECUTION_MODE as ExecutionMode) ??
     ExecutionMode.AUTO_EXCHANGE_ONLY,
-  p2pProvider: (process.env.P2P_PROVIDER ?? 'binance').trim(),
-  market: {
-    /** P2P-стакан: USD/EUR обычно открыты с VPS; RUB часто пустой вне РФ */
-    fiat: (process.env.FIAT ?? 'USD').trim(),
-    asset: (process.env.ASSET ?? 'USDT').trim(),
-  },
   strategy: {
-    minSpreadPercent: parseFloat(process.env.MIN_SPREAD_PERCENT ?? '0.15'),
-    maxNotionalUsdt: parseFloat(process.env.MAX_NOTIONAL_USDT ?? '500'),
+    /** Номинальный потолок на сделку (USDT). Сайзинг по риску урежет ниже. */
+    maxNotionalUsdt: parseFloat(process.env.MAX_NOTIONAL_USDT ?? '20'),
+    /** Дневной стоп по суммарному убытку (USDT). 0 = выкл. */
     dailyMaxLossUsdt: parseFloat(process.env.DAILY_MAX_LOSS_USDT ?? '50'),
     /** 0 = выкл. Макс. число исполненных Spot-ордеров за сутки (UTC). */
     maxDailySpotTrades: parseInt(process.env.MAX_DAILY_SPOT_TRADES ?? '0', 10),
-    /**
-     * 0 = выкл. Пауза, если подряд N исполненных SELL roundtrip с отрицательным realizedPnlUsdtEstimate.
-     */
+    /** 0 = выкл. Пауза на lossStreakCooldownMs после N подряд убыточных SELL. */
     maxConsecutiveLossSells: parseInt(
-      process.env.MAX_CONSECUTIVE_LOSS_SELLS ?? '0',
+      process.env.MAX_CONSECUTIVE_LOSS_SELLS ?? '5',
       10,
     ),
-    /** Cooldown после серии убытков (мс). 0 = полная остановка (старое поведение). */
+    /** Cooldown после серии убытков (мс). По умолчанию 30 мин. */
     lossStreakCooldownMs: parseInt(
-      process.env.LOSS_STREAK_COOLDOWN_MS ?? '0',
+      process.env.LOSS_STREAK_COOLDOWN_MS ?? '1800000',
       10,
     ),
-    takerFeePercent: parseFloat(process.env.P2P_TAKER_FEE_PERCENT ?? '0'),
+    /** Комиссия taker на одну сторону (%). Binance Spot по умолчанию 0.1. */
+    spotTakerFeePercent: parseFloat(
+      process.env.SPOT_TAKER_FEE_PERCENT ?? '0.1',
+    ),
+    /** Риск на сделку как % от эквити (для сайзинга: notional = risk / SL%). */
+    riskPerTradePercent: parseFloat(process.env.RISK_PER_TRADE_PERCENT ?? '1'),
+    /** Минимальная чистая прибыль TP сверх 2× комиссии (%). */
+    minNetTpPercent: parseFloat(process.env.MIN_NET_TP_PERCENT ?? '0.3'),
+    /** Минимальный notional ордера (USDT). Дополнительная защита к min notional биржи. */
+    minOrderNotionalUsdt: parseFloat(
+      process.env.MIN_ORDER_NOTIONAL_USDT ?? '10',
+    ),
+    /** Период ATR (свечи 1h). */
+    atrPeriod: parseInt(process.env.ATR_PERIOD ?? '14', 10),
+    /** Множитель ATR для стоп-лосса (SL = entry − multSL × ATR). */
+    atrSlMult: parseFloat(process.env.ATR_SL_MULT ?? '1.0'),
+    /** Множитель ATR для тейк-профита (TP = entry + multTP × ATR). */
+    atrTpMult: parseFloat(process.env.ATR_TP_MULT ?? '2.0'),
+    /** После какого профита в ATR включаем трейлинг-стоп. */
+    atrTrailActivationMult: parseFloat(
+      process.env.ATR_TRAIL_ACTIVATION_MULT ?? '1.0',
+    ),
+    /** Минимальный ADX(14) для входа (boковик = skip). */
+    adxMin: parseFloat(process.env.ADX_MIN ?? '20'),
+    /** Период быстрой EMA (1h). */
+    emaFast: parseInt(process.env.EMA_FAST ?? '20', 10),
+    /** Период средней EMA (1h) — основной фильтр тренда. */
+    emaSlow: parseInt(process.env.EMA_SLOW ?? '50', 10),
+    /** Период длинной EMA (1h) — макро-фильтр. */
+    emaLong: parseInt(process.env.EMA_LONG ?? '200', 10),
+    /** Диапазон RSI(14) для входа (откат, не перекупленность). */
+    rsiEntryMin: parseFloat(process.env.RSI_ENTRY_MIN ?? '40'),
+    rsiEntryMax: parseFloat(process.env.RSI_ENTRY_MAX ?? '65'),
+    /** Сколько 4h свечей назад смотреть на swing low. */
+    swingLookback4h: parseInt(process.env.SWING_LOOKBACK_4H ?? '12', 10),
   },
-  ton: {
-    manifestUrl: process.env.TON_CONNECT_MANIFEST_URL,
-    paymentRecipient: process.env.TON_PAYMENT_RECIPIENT,
-    requireAccess: process.env.REQUIRE_TON_ACCESS === 'true',
+  ai: {
+    geminiEnabled: process.env.GEMINI_ENABLED === 'true',
+    geminiApiKey: process.env.GEMINI_API_KEY ?? '',
+    geminiModel: process.env.GEMINI_MODEL ?? 'gemini-1.5-flash-latest',
+    /** Если consulted=true и confidence ниже порога — пропуск входа. */
+    minConfidence: parseFloat(process.env.GEMINI_MIN_CONFIDENCE ?? '60'),
+    /** TTL кэша решений (мс). */
+    cacheMs: parseInt(process.env.GEMINI_CACHE_MS ?? '600000', 10),
   },
   autoTrade: {
-    /** Интервал тика авто-симуляции (мс), по умолчанию 3 мин */
+    /** Интервал тика авто-торговли (мс), по умолчанию 3 мин */
     intervalMs: parseInt(process.env.AUTO_TRADE_INTERVAL_MS ?? '180000', 10),
-    /** UTC `08:00-21:00` или пусто = без фильтра по часам */
+    /** UTC окно `08:00-21:00` или пусто = без фильтра по часам */
     tradingWindowUtc: process.env.TRADING_WINDOW_UTC ?? '',
     /** UTC дни: `1-5` (Пн–Пт), пусто = все дни */
     tradingDaysUtc: process.env.TRADING_DAYS_UTC ?? '',
     /**
      * 0 = выкл. При заданном STATS_EQUITY_BASELINE_USDT — пауза автоторговли,
-     * если оценка счёта в quote упала ниже baseline более чем на N %.
+     * если эквити упало ниже baseline более чем на N %.
      */
     maxEquityDrawdownPercent: parseFloat(
-      process.env.AUTO_TRADE_MAX_EQUITY_DRAWDOWN_PERCENT ?? '0',
+      process.env.AUTO_TRADE_MAX_EQUITY_DRAWDOWN_PERCENT ?? '15',
     ),
   },
-  /** Виртуальный стартовый баланс для отчёта /stats (бумага) */
-  paper: {
-    startingWalletUsdt: parseFloat(
-      process.env.PAPER_WALLET_START_USDT ?? '10000',
-    ),
-  },
-  /**
-   * Опционально: стартовая оценка счёта в валюте котировки пары (USDT и т.д.),
-   * чтобы в /stats показать прибыль/убыток «с начала» (текущая оценка − база).
-   */
   stats: {
     equityBaselineQuote: (() => {
       const v = process.env.STATS_EQUITY_BASELINE_USDT?.trim();
@@ -226,15 +143,10 @@ export default () => ({
       return Number.isFinite(n) ? n : null;
     })(),
   },
-  /** Кэш публичной статистики свечей (market) для Telegram / внутренних проверок */
   marketStats: {
     cacheTtlSec: parseInt(process.env.MARKET_STATS_CACHE_TTL_SEC ?? '120', 10),
-    /**
-     * Символ для /api/v3/klines (если пусто — как BINANCE_SPOT_SYMBOL).
-     * На testnet многих пар нет: задайте BTCUSDT или SOLUSDT, даже если Spot-торговля по другой паре.
-     */
+    /** Символ для /api/v3/klines; пусто = BINANCE_SPOT_SYMBOL */
     klinesSymbol: (process.env.MARKET_STATS_SYMBOL ?? '').trim(),
-    /** Если основной символ даёт Invalid symbol — одна попытка с этим (по умолчанию BTCUSDT). */
     fallbackKlinesSymbol: (
       process.env.MARKET_STATS_FALLBACK_SYMBOL ?? 'BTCUSDT'
     ).trim(),

@@ -43,12 +43,18 @@ model BotState {
   autoTradeEnabled   Boolean @default(false)
   /// Куда слать уведомления об авто-шаге (обычно chat id того, кто включил)
   notifyChatId       String?
-  /// Учётная позиция BTC для режима BINANCE_SPOT_STRATEGY=roundtrip (только накопленное ботом)
+  /// Учётный объём базового актива (SOL) в открытой roundtrip-позиции (накопленное ботом)
   spotTrackedBtc     Decimal @default(0) @db.Decimal(18, 8)
-  /// Средневзвешенная цена входа (USDT за 1 BTC); 0 если позиции нет
+  /// Средневзвешенная цена входа в валюте котировки (USDT за 1 SOL); 0 если позиции нет
   spotAvgEntryUsdt   Decimal @default(0) @db.Decimal(18, 8)
   /// Макс. марк-цена с момента входа (для аварийного выхода от пика); 0 без позиции
   spotRoundtripPeakMarkUsdt Decimal @default(0) @db.Decimal(18, 8)
+  /// Абсолютная цена активного трейлинг-стопа в валюте котировки; 0 — трейлинг не активирован
+  spotTrailingStopUsdt Decimal @default(0) @db.Decimal(18, 8)
+  /// Цена уровня take-profit для текущей позиции (для трейлинга и отображения)
+  spotTpPriceUsdt    Decimal @default(0) @db.Decimal(18, 8)
+  /// Цена уровня stop-loss для текущей позиции
+  spotSlPriceUsdt    Decimal @default(0) @db.Decimal(18, 8)
   /// Время последнего успешного SELL, закрывшего учётную позицию (кулдаун перед следующим BUY)
   spotRoundtripLastSellAt DateTime?
   updatedAt          DateTime @updatedAt

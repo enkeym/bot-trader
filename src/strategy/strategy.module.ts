@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { P2pModule } from '../p2p/p2p.module';
-import { SpreadService } from './spread.service';
+import { BinanceModule } from '../binance/binance.module';
+import { RegimeService } from './regime.service';
+import { TaService } from './ta.service';
 
 @Module({
-  imports: [ConfigModule, P2pModule],
-  providers: [SpreadService],
-  exports: [SpreadService],
+  imports: [ConfigModule, BinanceModule],
+  providers: [TaService, RegimeService],
+  exports: [TaService, RegimeService],
 })
 export class StrategyModule {}
