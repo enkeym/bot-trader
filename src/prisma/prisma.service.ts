@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS "BotState" (
       await tx.$executeRawUnsafe(
         `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "spotSlPriceUsdt" DECIMAL(18,8) NOT NULL DEFAULT 0`,
       );
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "lossStreakAckFingerprint" TEXT`,
+      );
+      await tx.$executeRawUnsafe(
+        `ALTER TABLE "BotState" ADD COLUMN IF NOT EXISTS "lossStreakPauseUntilAt" TIMESTAMP(3)`,
+      );
     });
   }
 
