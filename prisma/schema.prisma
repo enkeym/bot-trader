@@ -57,5 +57,9 @@ model BotState {
   spotSlPriceUsdt    Decimal @default(0) @db.Decimal(18, 8)
   /// Время последнего успешного SELL, закрывшего учётную позицию (кулдаун перед следующим BUY)
   spotRoundtripLastSellAt DateTime?
+  /// Отпечаток последних N убыточных SELL, для которых уже сработала пауза (переживает рестарт контейнера)
+  lossStreakAckFingerprint String?
+  /// До какого момента UTC действует пауза по серии убытков
+  lossStreakPauseUntilAt   DateTime?
   updatedAt          DateTime @updatedAt
 }

@@ -149,9 +149,16 @@ export class RiskService {
     return this.checkEquityDrawdownVsBaseline();
   }
 
-  async hasConsecutiveLossStreak(): Promise<boolean> {
+  /**
+   * N последних SELL подряд с убытком. fingerprint — id ордеров в порядке от нового к старому;
+   * пустая строка, если серии нет (нужен для autotrade: не блокировать вечно после кулдауна).
+   */
+  async getConsecutiveLossStreakInfo(): Promise<{
+    active: boolean;
+    fingerprint: string;
+  }> {
     const n = this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
-    if (!(n > 0)) return false;
+    if (!(n > 0)) return { active: false, fingerprint: '' };
 
     const rows = await this.prisma.orderIntent.findMany({
       where: {
@@ -161,19 +168,19 @@ export class RiskService {
       },
       orderBy: { createdAt: 'desc' },
       take: n,
-      select: { payload: true },
+      select: { id: true, payload: true },
     });
 
-    if (rows.length < n) return false;
+    if (rows.length < n) return { active: false, fingerprint: '' };
 
     for (const row of rows) {
       const est = (row.payload as SpotPayloadForLoss | null)?.roundtrip
         ?.realizedPnlUsdtEstimate;
       if (est == null || typeof est !== 'number' || est >= 0) {
-        return false;
+        return { active: false, fingerprint: '' };
       }
     }
-    return true;
+    return { active: true, fingerprint: rows.map((r) => r.id).join(':') };
   }
 
   private async checkEquityDrawdownVsBaseline(): Promise<

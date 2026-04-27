@@ -4,6 +4,7 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
+import type { BotState } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { AuditService } from '../audit/audit.service';
@@ -35,8 +36,6 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   private lastDailyLimitAuditAt = 0;
   private lastCircuitAuditAt = 0;
   private lastCircuitTelegramNotifyKey = '';
-  private lossStreakPauseUntil = 0;
-  private lossStreakPausedAt = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -96,15 +95,14 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async runTick() {
-    let enabled = false;
+    let st: BotState;
     try {
-      const st = await this.getState();
-      enabled = st.autoTradeEnabled;
+      st = await this.getState();
     } catch (e) {
       this.logger.warn(`BotState: ${e}`);
       return;
     }
-    if (!enabled) return;
+    if (!st.autoTradeEnabled) return;
 
     const now = new Date();
     if (!this.risk.isWithinAutotradeTradingSchedule(now)) {
@@ -127,33 +125,51 @@ export class AutoTradeService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (Date.now() < this.lossStreakPauseUntil) {
+    const pauseUntil = st.lossStreakPauseUntilAt;
+    if (pauseUntil && pauseUntil.getTime() > Date.now()) {
       this.maybeAudit('lastDailyLimitAuditAt', () =>
         this.audit.log('info', 'autotrade_paused_loss_streak_tick', {
-          resumeAt: new Date(this.lossStreakPauseUntil).toISOString(),
+          resumeAt: pauseUntil.toISOString(),
         }),
       );
       return;
     }
 
-    const lossStreak = await this.risk.hasConsecutiveLossStreak();
-    if (lossStreak && Date.now() >= this.lossStreakPauseUntil) {
-      const n =
-        this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
-      const cooldownMs =
-        this.config.get<number>('strategy.lossStreakCooldownMs') ?? 0;
-      const effectiveCooldown = cooldownMs > 0 ? cooldownMs : 30 * 60_000;
-      if (this.lossStreakPausedAt + effectiveCooldown * 2 < Date.now()) {
-        this.lossStreakPauseUntil = Date.now() + effectiveCooldown;
-        this.lossStreakPausedAt = Date.now();
+    const { active: lossStreak, fingerprint } =
+      await this.risk.getConsecutiveLossStreakInfo();
+    const ackFp = st.lossStreakAckFingerprint ?? '';
+
+    if (lossStreak) {
+      if (fingerprint !== ackFp) {
+        const n =
+          this.config.get<number>('strategy.maxConsecutiveLossSells') ?? 0;
+        const cooldownMs =
+          this.config.get<number>('strategy.lossStreakCooldownMs') ?? 0;
+        const effectiveCooldown = cooldownMs > 0 ? cooldownMs : 30 * 60_000;
+        const resume = new Date(Date.now() + effectiveCooldown);
+        await this.prisma.botState.update({
+          where: { id: BOT_STATE_ID },
+          data: {
+            lossStreakAckFingerprint: fingerprint,
+            lossStreakPauseUntilAt: resume,
+          },
+        });
         void this.audit.log('info', 'autotrade_paused_loss_streak', {
           maxConsecutiveLossSells: n,
           cooldownMs: effectiveCooldown,
-          resumeAt: new Date(this.lossStreakPauseUntil).toISOString(),
+          resumeAt: resume.toISOString(),
         });
         void this.notifyLossStreakPause(n, effectiveCooldown);
+        return;
       }
-      return;
+    } else if (st.lossStreakAckFingerprint != null || st.lossStreakPauseUntilAt != null) {
+      await this.prisma.botState.update({
+        where: { id: BOT_STATE_ID },
+        data: {
+          lossStreakAckFingerprint: null,
+          lossStreakPauseUntilAt: null,
+        },
+      });
     }
 
     const circuit = await this.risk.checkAutotradeCircuitBreakers();
