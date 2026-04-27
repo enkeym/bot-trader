@@ -1,5 +1,4 @@
-# Trader — Docker (Postgres/Redis) + NestJS бот
-# Требуется: Docker, Node 20+, npm. Скопируйте .env из .env.example.
+
 
 .PHONY: help up infra down restart rebuild destroy logs ps \
 	install build dev prod start app \
