@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { GeminiService } from './gemini.service';
+import { GigaChatService } from './gigachat.service';
 
 @Module({
   imports: [ConfigModule],
-  providers: [GeminiService],
-  exports: [GeminiService],
+  providers: [GigaChatService],
+  exports: [GigaChatService],
 })
 export class AiModule {}

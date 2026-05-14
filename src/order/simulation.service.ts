@@ -21,7 +21,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { RegimeService } from '../strategy/regime.service';
 import { RiskService } from '../risk/risk.service';
-import { GeminiService } from '../ai/gemini.service';
+import { GigaChatService } from '../ai/gigachat.service';
 import { parseSpotExchangeFill } from './balance-telegram.format';
 import { OrderIntentService } from './order-intent.service';
 import {
@@ -107,7 +107,7 @@ export class SimulationService {
     private readonly prisma: PrismaService,
     private readonly binanceSpot: BinanceSpotService,
     private readonly regime: RegimeService,
-    private readonly ai: GeminiService,
+    private readonly ai: GigaChatService,
   ) {}
 
   async runPairSimulation(notionalCap: number): Promise<SimulationTickResult> {
@@ -593,12 +593,14 @@ export class SimulationService {
       rsi14: regime.rsi14,
       adx14: regime.adx14,
       atr14: regime.atr,
+      atrPercent: regime.atrPercent,
       slPercent: regime.slPercent,
       tpPercent: regime.tpPercent,
-      recentCloses1h: [],
-      recentCloses4h: [],
+      recentCloses1h: regime.recentCloses1h,
+      recentCloses4h: regime.recentCloses4h,
     });
-    const minConf = this.config.get<number>('ai.minConfidence') ?? 60;
+    const minConf =
+      this.config.get<number>('ai.gigachat.minConfidence') ?? 60;
     if (
       aiDecision.consulted &&
       (aiDecision.action === 'SKIP' || (aiDecision.confidence ?? 0) < minConf)
