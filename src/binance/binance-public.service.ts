@@ -36,6 +36,19 @@ export class BinancePublicService {
   }
 
   /**
+   * Источник публичных свечей: testnet хранит только последние сотни свечей,
+   * чего недостаточно для EMA200 / ADX(14). Поэтому исторические klines
+   * читаем с mainnet, а торговые ордера могут оставаться на testnet.
+   */
+  private getKlinesBaseUrl(): string {
+    const explicit = this.config
+      .get<string>('binance.publicKlinesBaseUrl')
+      ?.trim();
+    if (explicit) return explicit;
+    return 'https://api.binance.com';
+  }
+
+  /**
    * GET /api/v3/klines — до 1000 свечей за запрос.
    */
   async getKlines(params: {
@@ -46,7 +59,7 @@ export class BinancePublicService {
     | { ok: true; data: unknown[][] }
     | { ok: false; error: string; code?: number }
   > {
-    const base = this.getBaseUrl().replace(/\/$/, '');
+    const base = this.getKlinesBaseUrl().replace(/\/$/, '');
     const symbol = params.symbol.toUpperCase();
     const limit = Math.min(1000, Math.max(1, params.limit));
     try {

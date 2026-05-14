@@ -76,7 +76,41 @@ class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
-  GEMINI_API_KEY?: string;
+  GIGA_AUTH?: string;
+
+  @IsOptional()
+  @IsString()
+  GIGA_SCOPE?: string;
+
+  @IsOptional()
+  @IsString()
+  GIGA_MODEL?: string;
+
+  @IsOptional()
+  @IsString()
+  GIGA_OAUTH_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  GIGA_CHAT_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  GIGA_CA_PATH?: string;
+
+  @IsOptional()
+  @IsString()
+  BINANCE_PUBLIC_KLINES_URL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  MIN_ATR_PERCENT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  MAX_BUY_SLIPPAGE_PCT?: number;
 }
 
 export function validateEnv(config: Record<string, unknown>) {
@@ -98,6 +132,8 @@ export function validateEnv(config: Record<string, unknown>) {
     'DAILY_MAX_LOSS_USDT',
     'SPOT_TAKER_FEE_PERCENT',
     'RISK_PER_TRADE_PERCENT',
+    'MIN_ATR_PERCENT',
+    'MAX_BUY_SLIPPAGE_PCT',
   ] as const;
   for (const k of numeric) {
     if (coerce[k] !== undefined) coerce[k] = Number(coerce[k]);

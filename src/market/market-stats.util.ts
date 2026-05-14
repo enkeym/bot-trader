@@ -8,6 +8,8 @@ export type KlineCandle = {
   high: number;
   low: number;
   close: number;
+  /** Базовый объём свечи (для фильтра по объёму). 0 если неизвестен. */
+  volume?: number;
 };
 
 export type WindowStats = {
@@ -26,6 +28,7 @@ export function parseBinanceKline(raw: unknown): KlineCandle | null {
   const h = Number(raw[2]);
   const l = Number(raw[3]);
   const c = Number(raw[4]);
+  const v = Number(raw[5]);
   if (![o, h, l, c].every((x) => Number.isFinite(x))) return null;
   return {
     openTime: Number(raw[0]),
@@ -33,6 +36,7 @@ export function parseBinanceKline(raw: unknown): KlineCandle | null {
     high: h,
     low: l,
     close: c,
+    volume: Number.isFinite(v) ? v : 0,
   };
 }
 

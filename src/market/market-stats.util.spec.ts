@@ -10,7 +10,7 @@ import {
 
 describe('market-stats.util', () => {
   it('parseBinanceKline', () => {
-    const raw = [1_700_000_000_000, '100', '110', '90', '105', '1'];
+    const raw = [1_700_000_000_000, '100', '110', '90', '105', '1.5'];
     const c = parseBinanceKline(raw);
     expect(c).toEqual({
       openTime: 1_700_000_000_000,
@@ -18,6 +18,7 @@ describe('market-stats.util', () => {
       high: 110,
       low: 90,
       close: 105,
+      volume: 1.5,
     });
   });
 

@@ -16,6 +16,13 @@ export default () => ({
     apiSecret: process.env.BINANCE_API_SECRET,
     /** База Spot API; по умолчанию продакшен Binance */
     spotBaseUrl: process.env.BINANCE_SPOT_BASE_URL ?? 'https://api.binance.com',
+    /**
+     * Отдельная база для публичных klines: testnet возвращает мало истории
+     * (EMA200/ADX не считаются). По умолчанию mainnet.
+     */
+    publicKlinesBaseUrl: (
+      process.env.BINANCE_PUBLIC_KLINES_URL ?? 'https://api.binance.com'
+    ).trim(),
     spotSymbol: process.env.BINANCE_SPOT_SYMBOL ?? 'SOLUSDT',
     /** Потолок quote на один MARKET BUY (USDT) */
     spotMaxQuoteUsdt: parseFloat(
@@ -110,15 +117,57 @@ export default () => ({
     rsiEntryMax: parseFloat(process.env.RSI_ENTRY_MAX ?? '65'),
     /** Сколько 4h свечей назад смотреть на swing low. */
     swingLookback4h: parseInt(process.env.SWING_LOOKBACK_4H ?? '12', 10),
+    /**
+     * Минимальная относительная волатильность (ATR/цена × 100), %. Ниже —
+     * skip, чтобы не торговать на «полке», где SL/TP съедаются комиссиями.
+     */
+    minAtrPercent: parseFloat(process.env.MIN_ATR_PERCENT ?? '0.4'),
+    /**
+     * Допустимое отклонение фактической средней цены MARKET BUY от рефернсной
+     * markPrice стратегии (%). Выше — поднимаем SL (сохраняя SL%) и пишем audit-warn.
+     */
+    maxBuySlippagePercent: parseFloat(
+      process.env.MAX_BUY_SLIPPAGE_PCT ?? '0.5',
+    ),
+    /** Требовать ли подтверждение объёмом (последний 1h > sma20). */
+    volumeConfirmation: (process.env.VOLUME_CONFIRMATION ?? 'true') === 'true',
+    /**
+     * Максимальный возраст последней 1h-свечи (мин). Выше — skip (stale_klines).
+     */
+    maxKlineAgeMinutes: parseInt(
+      process.env.MAX_KLINE_AGE_MINUTES ?? '120',
+      10,
+    ),
+    /** Лимит ликвидности: доля от 1h-объёма (в %). */
+    liquidityVol1hCapPct: parseFloat(
+      process.env.LIQUIDITY_VOL1H_CAP_PCT ?? '5',
+    ),
   },
   ai: {
-    geminiEnabled: process.env.GEMINI_ENABLED === 'true',
-    geminiApiKey: process.env.GEMINI_API_KEY ?? '',
-    geminiModel: process.env.GEMINI_MODEL ?? 'gemini-1.5-flash-latest',
-    /** Если consulted=true и confidence ниже порога — пропуск входа. */
-    minConfidence: parseFloat(process.env.GEMINI_MIN_CONFIDENCE ?? '60'),
-    /** TTL кэша решений (мс). */
-    cacheMs: parseInt(process.env.GEMINI_CACHE_MS ?? '600000', 10),
+    provider: 'gigachat',
+    gigachat: {
+      enabled: (process.env.GIGA_ENABLED ?? 'true') === 'true',
+      /** Base64(client_id:client_secret) для Basic auth. */
+      auth: (process.env.GIGA_AUTH ?? '').trim(),
+      scope: (process.env.GIGA_SCOPE ?? 'GIGACHAT_API_PERS').trim(),
+      model: (process.env.GIGA_MODEL ?? 'GigaChat-2').trim(),
+      oauthUrl: (
+        process.env.GIGA_OAUTH_URL ??
+        'https://ngw.devices.sberbank.ru:9443/api/v2/oauth'
+      ).trim(),
+      chatUrl: (
+        process.env.GIGA_CHAT_URL ??
+        'https://gigachat.devices.sberbank.ru/api/v1/chat/completions'
+      ).trim(),
+      /** Доп. путь к Sber root CA (Минцифры) — иначе rejectUnauthorized=false. */
+      caPath: (process.env.GIGA_CA_PATH ?? '').trim(),
+      /** Отключение проверки сертификата (только для Сбер-доменов). */
+      insecureTls: (process.env.GIGA_INSECURE_TLS ?? 'true') === 'true',
+      /** Минимальная уверенность для подтверждения BUY (0..100). */
+      minConfidence: parseFloat(process.env.GIGA_MIN_CONFIDENCE ?? '60'),
+      /** TTL кэша решений (мс). */
+      cacheMs: parseInt(process.env.GIGA_CACHE_MS ?? '600000', 10),
+    },
   },
   autoTrade: {
     /** Интервал тика авто-торговли (мс), по умолчанию 3 мин */
